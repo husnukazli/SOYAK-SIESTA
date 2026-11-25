@@ -58,7 +58,7 @@ export function CourtScheduleView({
         <div className="lg:col-span-7 bg-white border border-slate-200 rounded-xl p-6 sm:p-8 flex flex-col justify-between gap-6">
           <div className="space-y-4">
             <div className="flex flex-wrap items-center gap-2 text-xs text-slate-500">
-              <span>Site Tenis Kortu</span>
+              <span>Soyak Siesta Tenis Kortu</span>
               <span aria-hidden="true">·</span>
               <span className="font-mono">{schedule?.nowIstanbulLabel || 'TSİ Saat Yükleniyor'}</span>
               <span aria-hidden="true">·</span>

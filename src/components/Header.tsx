@@ -34,7 +34,7 @@ export function Header({
           onClick={() => onSelectTab('schedule')}
           className="font-display text-lg font-bold tracking-tight text-slate-900 whitespace-nowrap shrink-0 cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-700 rounded-sm"
         >
-          Kort Rezervasyon
+          Soyak Siesta Tenis
         </button>
 
         {/* Zone 2: Clean single-line navigation links */}

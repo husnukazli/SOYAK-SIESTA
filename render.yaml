@@ -1,6 +1,6 @@
 services:
   - type: web
-    name: kort-rezervasyon
+    name: soyaksiestatenis
     runtime: node
     plan: free
     buildCommand: npm install && npm run build
@@ -11,7 +11,7 @@ services:
         value: production
       - key: DATABASE_URL
         fromDatabase:
-          name: kort-rezervasyon-db
+          name: soyaksiestatenis-db
           property: connectionString
       - key: SESSION_SECRET
         generateValue: true
@@ -19,7 +19,7 @@ services:
         sync: false
 
 databases:
-  - name: kort-rezervasyon-db
+  - name: soyaksiestatenis-db
     plan: free
-    databaseName: kort_rezervasyon
+    databaseName: soyaksiestatenis
     user: kort_admin
