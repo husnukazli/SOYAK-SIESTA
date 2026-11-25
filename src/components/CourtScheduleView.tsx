@@ -14,7 +14,6 @@ import {
   CloudSun,
   Download,
   Droplets,
-  Flame,
   Lock,
   MapPin,
   ShieldAlert,
@@ -449,10 +448,14 @@ export function CourtScheduleView({
             </p>
           </div>
 
-          <div className="flex flex-wrap items-center gap-3 text-[11px] font-medium text-slate-600">
+          <div className="flex flex-wrap items-center gap-x-3 gap-y-1.5 text-[11px] font-medium text-slate-600">
             <span className="inline-flex items-center gap-1.5">
               <span className="w-3 h-3 rounded bg-white border border-slate-300 inline-block" />
               Müsait
+            </span>
+            <span className="inline-flex items-center gap-1.5">
+              <span className="w-3 h-3 rounded bg-cyan-100 border border-cyan-400 inline-block" />
+              Yoğun Saat (18:00 - 21:00)
             </span>
             <span className="inline-flex items-center gap-1.5">
               <span className="w-3 h-3 rounded bg-rose-100 border border-rose-300 inline-block" />
@@ -554,12 +557,20 @@ export function CourtScheduleView({
                 }
               };
 
+              const isOpenPrime =
+                slot.primeTime &&
+                !slot.isPast &&
+                !slot.reservation &&
+                (canBook || canResidentClickGuest);
+
               const cardClasses = isOwn
                 ? 'bg-emerald-50 border-2 border-emerald-600 text-slate-900'
                 : slot.reservation
                 ? 'bg-rose-50/90 border border-rose-200 text-slate-900'
                 : slot.isPast
                 ? 'bg-slate-100/80 border-slate-200 text-slate-400'
+                : isOpenPrime
+                ? 'bg-cyan-50/90 border-cyan-300 hover:border-cyan-600 active:scale-[0.98] text-slate-900'
                 : canBook || canResidentClickGuest
                 ? 'bg-white border-slate-200 hover:border-emerald-600 active:scale-[0.98] text-slate-900'
                 : 'bg-amber-50/60 border-amber-200 text-slate-700';
@@ -570,6 +581,8 @@ export function CourtScheduleView({
                 ? 'bg-rose-700 text-white'
                 : slot.isPast
                 ? 'bg-slate-200 text-slate-500'
+                : isOpenPrime
+                ? 'bg-cyan-100 text-cyan-800'
                 : canBook || canResidentClickGuest
                 ? 'bg-emerald-100 text-emerald-800'
                 : 'bg-amber-100 text-amber-800';
@@ -634,12 +647,6 @@ export function CourtScheduleView({
                           Şu An
                         </span>
                       )}
-                      {slot.primeTime && !slot.isPast && (
-                        <span className="inline-flex items-center justify-end gap-0.5 text-[10px] font-semibold text-amber-700">
-                          <Flame className="w-3 h-3" aria-hidden="true" />
-                          <span>Yoğun</span>
-                        </span>
-                      )}
                     </div>
                   </div>
 
@@ -658,6 +665,21 @@ export function CourtScheduleView({
                     >
                       {formatHourRange(slot.hour)}
                     </p>
+                    {slot.primeTime && !slot.isPast && (
+                      <p
+                        className={`text-[11px] font-semibold ${
+                          isOwn
+                            ? 'text-emerald-800'
+                            : slot.reservation
+                            ? 'text-rose-800'
+                            : isBlocked
+                            ? 'text-amber-800'
+                            : 'text-cyan-800'
+                        }`}
+                      >
+                        Yoğun Kullanım Saati
+                      </p>
+                    )}
 
                     {slot.reservation ? (
                       <div className="space-y-0.5">
@@ -702,6 +724,8 @@ export function CourtScheduleView({
                         ? 'border-rose-200/80'
                         : isOwn
                         ? 'border-emerald-200'
+                        : isOpenPrime
+                        ? 'border-cyan-200'
                         : 'border-black/5'
                     }`}
                   >
