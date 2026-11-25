@@ -6,6 +6,10 @@ import { Pool } from 'pg';
 import type {
   ApartmentSummary,
   AuthSession,
+  PartnerFormat,
+  PartnerPostItem,
+  PartnerPostStatus,
+  PartnerReplyItem,
   PenaltyItem,
   PlayType,
   ReservationItem,
@@ -224,6 +228,35 @@ export async function initDatabase(): Promise<void> {
 
       CREATE INDEX IF NOT EXISTS idx_penalties_apt_created
         ON penalties(apartment_no, created_at_ms);
+
+      CREATE TABLE IF NOT EXISTS partner_posts (
+        id SERIAL PRIMARY KEY,
+        apartment_no TEXT NOT NULL REFERENCES apartments(apartment_no) ON DELETE CASCADE,
+        nickname TEXT NOT NULL,
+        skill_level INTEGER NOT NULL CHECK(skill_level BETWEEN 1 AND 7),
+        session_format TEXT NOT NULL CHECK(session_format IN ('match', 'training', 'rally')),
+        date_str TEXT NOT NULL,
+        start_hour INTEGER NOT NULL,
+        end_hour INTEGER NOT NULL,
+        note TEXT,
+        status TEXT NOT NULL DEFAULT 'open' CHECK(status IN ('open', 'matched', 'closed')),
+        created_at_ms BIGINT NOT NULL
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_partner_posts_date_created
+        ON partner_posts(date_str, created_at_ms DESC);
+
+      CREATE TABLE IF NOT EXISTS partner_replies (
+        id SERIAL PRIMARY KEY,
+        post_id INTEGER NOT NULL REFERENCES partner_posts(id) ON DELETE CASCADE,
+        apartment_no TEXT NOT NULL REFERENCES apartments(apartment_no) ON DELETE CASCADE,
+        nickname TEXT NOT NULL,
+        message TEXT NOT NULL,
+        created_at_ms BIGINT NOT NULL
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_partner_replies_post_created
+        ON partner_replies(post_id, created_at_ms ASC);
     `);
   } else {
     if (!sqliteDb) {
@@ -288,11 +321,62 @@ export async function initDatabase(): Promise<void> {
 
       CREATE INDEX IF NOT EXISTS idx_penalties_apt_created
         ON penalties(apartment_no, created_at_ms);
+
+      CREATE TABLE IF NOT EXISTS partner_posts (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        apartment_no TEXT NOT NULL REFERENCES apartments(apartment_no) ON DELETE CASCADE,
+        nickname TEXT NOT NULL,
+        skill_level INTEGER NOT NULL CHECK(skill_level BETWEEN 1 AND 7),
+        session_format TEXT NOT NULL CHECK(session_format IN ('match', 'training', 'rally')),
+        date_str TEXT NOT NULL,
+        start_hour INTEGER NOT NULL,
+        end_hour INTEGER NOT NULL,
+        note TEXT,
+        status TEXT NOT NULL DEFAULT 'open' CHECK(status IN ('open', 'matched', 'closed')),
+        created_at_ms INTEGER NOT NULL
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_partner_posts_date_created
+        ON partner_posts(date_str, created_at_ms DESC);
+
+      CREATE TABLE IF NOT EXISTS partner_replies (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        post_id INTEGER NOT NULL REFERENCES partner_posts(id) ON DELETE CASCADE,
+        apartment_no TEXT NOT NULL REFERENCES apartments(apartment_no) ON DELETE CASCADE,
+        nickname TEXT NOT NULL,
+        message TEXT NOT NULL,
+        created_at_ms INTEGER NOT NULL
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_partner_replies_post_created
+        ON partner_replies(post_id, created_at_ms ASC);
     `);
 
     const cols = conn.prepare('PRAGMA table_info(apartments)').all() as { name: string }[];
     if (!cols.some((c) => c.name === 'password_encrypted')) {
       conn.exec('ALTER TABLE apartments ADD COLUMN password_encrypted TEXT');
+    }
+  }
+
+  // One-time cleanup: remove leftover pre-seeded numeric apartments (1..20) that do NOT have a password assigned
+  const cleanupDone = await db.queryOne<{ value: string }>(
+    "SELECT value FROM settings WHERE key = 'cleaned_default_seed_v1'"
+  );
+  if (!cleanupDone) {
+    const defaultIds = Array.from({ length: 20 }, (_, i) => String(i + 1));
+    const placeholders = defaultIds.map(() => '?').join(',');
+    await db.execute(
+      `DELETE FROM apartments WHERE apartment_no IN (${placeholders}) AND password_hash IS NULL`,
+      defaultIds
+    );
+    if (isPostgres) {
+      await db.execute(
+        "INSERT INTO settings (key, value) VALUES ('cleaned_default_seed_v1', '1') ON CONFLICT (key) DO NOTHING"
+      );
+    } else {
+      await db.execute(
+        "INSERT OR IGNORE INTO settings (key, value) VALUES ('cleaned_default_seed_v1', '1')"
+      );
     }
   }
 
@@ -406,10 +490,13 @@ interface TokenPayload {
   exp: number;
 }
 
-export function signSessionToken(payload: Omit<TokenPayload, 'exp'>): string {
+export function signSessionToken(
+  payload: Omit<TokenPayload, 'exp'>,
+  ttlMs: number = 12 * 60 * 60 * 1000
+): string {
   const fullPayload: TokenPayload = {
     ...payload,
-    exp: Date.now() + 12 * 60 * 60 * 1000,
+    exp: Date.now() + ttlMs,
   };
   const encoded = Buffer.from(JSON.stringify(fullPayload)).toString('base64url');
   const sig = crypto
@@ -417,6 +504,24 @@ export function signSessionToken(payload: Omit<TokenPayload, 'exp'>): string {
     .update(encoded)
     .digest('base64url');
   return `${encoded}.${sig}`;
+}
+
+export function parseCookies(cookieHeader: string | undefined): Record<string, string> {
+  const result: Record<string, string> = {};
+  if (!cookieHeader) return result;
+  for (const part of cookieHeader.split(';')) {
+    const idx = part.indexOf('=');
+    if (idx <= 0) continue;
+    const key = part.slice(0, idx).trim();
+    const rawVal = part.slice(idx + 1).trim();
+    if (!key) continue;
+    try {
+      result[key] = decodeURIComponent(rawVal);
+    } catch {
+      result[key] = rawVal;
+    }
+  }
+  return result;
 }
 
 export function verifySessionToken(token: string): Omit<AuthSession, 'token'> | null {
@@ -532,6 +637,64 @@ export function mapPenaltyRow(row: RawPenaltyRow): PenaltyItem {
     note: row.note,
     feeAmount: row.fee_amount,
     createdAtMs: Number(row.created_at_ms),
+  };
+}
+
+export interface RawPartnerPostRow {
+  id: number | string;
+  apartment_no: string;
+  nickname: string;
+  skill_level: number | string;
+  session_format: PartnerFormat;
+  date_str: string;
+  start_hour: number | string;
+  end_hour: number | string;
+  note: string | null;
+  status: PartnerPostStatus;
+  created_at_ms: number | string;
+}
+
+export interface RawPartnerReplyRow {
+  id: number | string;
+  post_id: number | string;
+  apartment_no: string;
+  nickname: string;
+  message: string;
+  created_at_ms: number | string;
+}
+
+export function mapPartnerReplyRow(
+  row: RawPartnerReplyRow,
+  viewerApartmentNo: string | null
+): PartnerReplyItem {
+  return {
+    id: Number(row.id),
+    postId: Number(row.post_id),
+    nickname: row.nickname,
+    message: row.message,
+    createdAtMs: Number(row.created_at_ms),
+    isOwn: Boolean(viewerApartmentNo && viewerApartmentNo === row.apartment_no),
+  };
+}
+
+export function mapPartnerPostRow(
+  row: RawPartnerPostRow,
+  viewerApartmentNo: string | null,
+  replies: PartnerReplyItem[]
+): PartnerPostItem {
+  return {
+    id: Number(row.id),
+    nickname: row.nickname,
+    skillLevel: Number(row.skill_level),
+    sessionFormat: row.session_format,
+    dateStr: row.date_str,
+    startHour: Number(row.start_hour),
+    endHour: Number(row.end_hour),
+    note: row.note,
+    status: row.status,
+    createdAtMs: Number(row.created_at_ms),
+    isOwn: Boolean(viewerApartmentNo && viewerApartmentNo === row.apartment_no),
+    replies,
   };
 }
 

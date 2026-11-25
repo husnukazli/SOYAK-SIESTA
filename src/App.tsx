@@ -6,6 +6,7 @@ import { BookingModal } from './components/BookingModal';
 import { CancelModal } from './components/CancelModal';
 import { CourtScheduleView } from './components/CourtScheduleView';
 import { Header, type ActiveTab } from './components/Header';
+import { PartnerBoardView } from './components/PartnerBoardView';
 import { ResidentPortalView } from './components/ResidentPortalView';
 import { RulesView } from './components/RulesView';
 import {
@@ -22,6 +23,7 @@ import type {
   ReservationItem,
   ScheduleResponse,
   ScheduleSlot,
+  WeatherResponse,
 } from './shared/types';
 
 export default function App() {
@@ -33,6 +35,7 @@ export default function App() {
   const [schedule, setSchedule] = useState<ScheduleResponse | null>(null);
   const [scheduleLoading, setScheduleLoading] = useState<boolean>(true);
   const [scheduleError, setScheduleError] = useState<string | null>(null);
+  const [weather, setWeather] = useState<WeatherResponse | null>(null);
 
   const [authModalOpen, setAuthModalOpen] = useState<boolean>(false);
   const [bookingSlot, setBookingSlot] = useState<ScheduleSlot | null>(null);
@@ -80,6 +83,20 @@ export default function App() {
 
   useEffect(() => {
     loadAuthStatus();
+    api
+      .restoreSession()
+      .then((res) => {
+        if (res.session?.role === 'resident' && res.session.apartmentNo && res.token) {
+          setSession({
+            role: 'resident',
+            apartmentNo: res.session.apartmentNo,
+            token: res.token,
+          });
+        }
+      })
+      .catch(() => {
+        // No remembered session cookie
+      });
   }, [loadAuthStatus]);
 
   useEffect(() => {
@@ -90,6 +107,26 @@ export default function App() {
     }, 60_000);
     return () => clearInterval(timer);
   }, [loadSchedule]);
+
+  useEffect(() => {
+    let active = true;
+    const fetchWeather = () => {
+      api
+        .getWeather()
+        .then((w) => {
+          if (active) setWeather(w);
+        })
+        .catch(() => {
+          // Non-blocking weather forecast
+        });
+    };
+    fetchWeather();
+    const timer = setInterval(fetchWeather, 15 * 60_000);
+    return () => {
+      active = false;
+      clearInterval(timer);
+    };
+  }, []);
 
   const handleRealtimeEvent = useCallback(
     (event: RealtimeEvent) => {
@@ -113,6 +150,8 @@ export default function App() {
         setPortalRefreshTick((n) => n + 1);
       } else if (event.type === 'directory:changed') {
         loadAuthStatus();
+        setPortalRefreshTick((n) => n + 1);
+      } else if (event.type === 'partner:changed') {
         setPortalRefreshTick((n) => n + 1);
       }
     },
@@ -161,6 +200,7 @@ export default function App() {
   };
 
   const handleLogout = () => {
+    api.logoutSession().catch(() => {});
     setSession(null);
     setToast({ message: 'Oturum kapatıldı.', tone: 'success' });
     loadSchedule();
@@ -247,6 +287,7 @@ export default function App() {
             schedule={schedule}
             loading={scheduleLoading}
             error={scheduleError}
+            weather={weather}
             selectedDate={selectedDate || schedule?.todayStr || getTodayIstanbulDateStr()}
             onSelectDate={handleSelectDate}
             session={session}
@@ -268,6 +309,17 @@ export default function App() {
             }}
             onGoToSchedule={() => handleSelectTab('schedule')}
             onRequestCancel={handleReservationToCancel}
+            refreshTrigger={portalRefreshTick}
+          />
+        )}
+
+        {effectiveTab === 'partners' && (
+          <PartnerBoardView
+            session={session}
+            onOpenResidentLogin={() => {
+              loadAuthStatus();
+              setAuthModalOpen(true);
+            }}
             refreshTrigger={portalRefreshTick}
           />
         )}
@@ -315,7 +367,6 @@ export default function App() {
           reservedByOtherApt={reservedByOtherInModal}
           onClose={() => setBookingSlot(null)}
           onBooked={(notice) => {
-            setBookingSlot(null);
             setToast({ message: notice, tone: 'success' });
             loadSchedule();
             setPortalRefreshTick((n) => n + 1);

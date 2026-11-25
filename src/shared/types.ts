@@ -6,6 +6,10 @@ export type PenaltyType = 'late_cancellation' | 'non_resident_violation';
 
 export type PenaltyAction = 'warning' | 'ban_7d' | 'ban_30d';
 
+export type PartnerFormat = 'match' | 'training' | 'rally';
+
+export type PartnerPostStatus = 'open' | 'matched' | 'closed';
+
 export interface AuthSession {
   role: 'resident' | 'admin';
   apartmentNo?: string;
@@ -53,7 +57,7 @@ export interface SlotEligibility {
   bookable: boolean;
   reason: string | null;
   primeTime: boolean;
-  sixteenHourOverrideUsed: boolean;
+  primeOverrideUsed: boolean;
   soloTrainingAllowed: boolean;
 }
 
@@ -107,6 +111,36 @@ export interface AdminOverviewResponse {
   todayStr: string;
 }
 
+export interface PartnerReplyItem {
+  id: number;
+  postId: number;
+  nickname: string;
+  message: string;
+  createdAtMs: number;
+  isOwn: boolean;
+}
+
+export interface PartnerPostItem {
+  id: number;
+  nickname: string;
+  skillLevel: number;
+  sessionFormat: PartnerFormat;
+  dateStr: string;
+  startHour: number;
+  endHour: number;
+  note: string | null;
+  status: PartnerPostStatus;
+  createdAtMs: number;
+  isOwn: boolean;
+  replies: PartnerReplyItem[];
+}
+
+export interface PartnerBoardResponse {
+  posts: PartnerPostItem[];
+  todayStr: string;
+  nowMs: number;
+}
+
 export type RealtimeEvent =
   | {
       type: 'connected';
@@ -127,4 +161,41 @@ export type RealtimeEvent =
     }
   | {
       type: 'directory:changed';
+    }
+  | {
+      type: 'partner:changed';
     };
+
+export interface WeatherHourlySlot {
+  dateStr: string;
+  hour: number;
+  tempC: number;
+  weatherCode: number;
+  conditionLabel: string;
+  precipProb: number;
+  windKmh: number;
+}
+
+export interface WeatherDailyItem {
+  dateStr: string;
+  weatherCode: number;
+  conditionLabel: string;
+  tempMinC: number;
+  tempMaxC: number;
+  precipProbMax: number;
+  windMaxKmh: number;
+}
+
+export interface WeatherResponse {
+  available: boolean;
+  locationLabel: string;
+  fetchedAtMs: number;
+  current: {
+    tempC: number;
+    weatherCode: number;
+    conditionLabel: string;
+    windKmh: number;
+  } | null;
+  daily: WeatherDailyItem[];
+  hourly: WeatherHourlySlot[];
+}

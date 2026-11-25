@@ -22,6 +22,7 @@ export function AuthModal({
 }: AuthModalProps) {
   const [apartmentNo, setApartmentNo] = useState<string>('');
   const [password, setPassword] = useState<string>('');
+  const [rememberMe, setRememberMe] = useState<boolean>(true);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -47,7 +48,7 @@ export function AuthModal({
     }
     setLoading(true);
     try {
-      const res = await api.loginResident(apartmentNo.trim(), password);
+      const res = await api.loginResident(apartmentNo.trim(), password, rememberMe);
       onAuthenticated({
         role: 'resident',
         apartmentNo: res.apartmentNo,
@@ -196,6 +197,21 @@ export function AuthModal({
               </p>
             )}
           </div>
+
+          <label className="flex items-center gap-3 min-h-[48px] px-3.5 py-2.5 border border-slate-200 rounded-xl bg-slate-50/70 hover:bg-slate-50 cursor-pointer transition-colors">
+            <input
+              type="checkbox"
+              checked={rememberMe}
+              onChange={(e) => setRememberMe(e.target.checked)}
+              className="h-5 w-5 rounded border-slate-300 text-emerald-700 focus:ring-emerald-700 shrink-0"
+            />
+            <div className="leading-snug">
+              <span className="block text-sm font-semibold text-slate-800">Beni hatırla</span>
+              <span className="block text-xs text-slate-500">
+                Bu cihazda 30 gün boyunca tekrar şifre sorma
+              </span>
+            </div>
+          </label>
 
           {error && (
             <div role="alert" className="p-3 bg-red-50 border border-red-200 rounded-xl text-xs text-red-800">

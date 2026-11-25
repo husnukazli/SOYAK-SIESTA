@@ -1,5 +1,6 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import {
+  BarChart3,
   Building2,
   CalendarDays,
   Check,
@@ -15,10 +16,12 @@ import {
   Trash2,
 } from 'lucide-react';
 import {
+  addDaysToDateStr,
   api,
   ApiError,
   formatHourRange,
   formatIstanbulDateTime,
+  getTodayIstanbulDateStr,
 } from '../lib/api';
 import type { AdminOverviewResponse, AuthSession } from '../shared/types';
 
@@ -30,7 +33,36 @@ interface AdminConsoleViewProps {
   refreshTrigger?: number;
 }
 
-type AdminSubTab = 'apartments' | 'violations' | 'reservations';
+type AdminSubTab = 'apartments' | 'violations' | 'reservations' | 'stats';
+type TimeRangePreset = 'today' | '7d' | '30d' | 'all' | 'custom';
+
+function getDateRangeBounds(
+  preset: TimeRangePreset,
+  todayStr: string,
+  customStart: string,
+  customEnd: string
+): { startDate: string | null; endDate: string | null } {
+  if (preset === 'today') return { startDate: todayStr, endDate: todayStr };
+  if (preset === '7d') return { startDate: addDaysToDateStr(todayStr, -6), endDate: null };
+  if (preset === '30d') return { startDate: addDaysToDateStr(todayStr, -29), endDate: null };
+  if (preset === 'custom') {
+    return {
+      startDate: customStart || null,
+      endDate: customEnd || null,
+    };
+  }
+  return { startDate: null, endDate: null };
+}
+
+function isDateStrInRange(
+  dateStr: string,
+  startDate: string | null,
+  endDate: string | null
+): boolean {
+  if (startDate && dateStr < startDate) return false;
+  if (endDate && dateStr > endDate) return false;
+  return true;
+}
 
 export function AdminConsoleView({
   session,
@@ -60,6 +92,7 @@ export function AdminConsoleView({
   const [revealedPasscodes, setRevealedPasscodes] = useState<Record<string, boolean>>({});
   const [copiedApt, setCopiedApt] = useState<string | null>(null);
   const [confirmDeleteApt, setConfirmDeleteApt] = useState<string | null>(null);
+  const [confirmCleanupUnassigned, setConfirmCleanupUnassigned] = useState(false);
 
   // Apartment search & add / reset
   const [aptSearch, setAptSearch] = useState('');
@@ -68,14 +101,30 @@ export function AdminConsoleView({
   const [customResetApt, setCustomResetApt] = useState<string | null>(null);
   const [customResetValue, setCustomResetValue] = useState('');
 
-  // Violation logging form (synced dynamically to first apartment)
+  // Violation logging & filtering
   const [violationApt, setViolationApt] = useState('');
   const [violationNote, setViolationNote] = useState('');
   const [violationFee, setViolationFee] = useState('');
   const [violationResId, setViolationResId] = useState<string>('');
+  const [penaltyTypeFilter, setPenaltyTypeFilter] = useState<
+    'all' | 'late_cancellation' | 'non_resident_violation'
+  >('all');
+  const [penaltyRange, setPenaltyRange] = useState<TimeRangePreset>('30d');
+  const [penaltyCustomStart, setPenaltyCustomStart] = useState('');
+  const [penaltyCustomEnd, setPenaltyCustomEnd] = useState('');
 
-  // Reservations filter
-  const [resFilter, setResFilter] = useState<'all' | 'active' | 'cancelled_late'>('all');
+  // Reservations filter (status + time)
+  const [resFilter, setResFilter] = useState<
+    'all' | 'active' | 'cancelled_late' | 'cancelled_ontime'
+  >('all');
+  const [resRange, setResRange] = useState<TimeRangePreset>('all');
+  const [resCustomStart, setResCustomStart] = useState('');
+  const [resCustomEnd, setResCustomEnd] = useState('');
+
+  // Statistics time filter
+  const [statsRange, setStatsRange] = useState<TimeRangePreset>('all');
+  const [statsCustomStart, setStatsCustomStart] = useState('');
+  const [statsCustomEnd, setStatsCustomEnd] = useState('');
 
   const fetchOverview = useCallback(async () => {
     if (!session || session.role !== 'admin') return;
@@ -96,6 +145,7 @@ export function AdminConsoleView({
   }, [fetchOverview, refreshTrigger]);
 
   const apartments = overview?.apartments ?? [];
+  const todayStr = overview?.todayStr || getTodayIstanbulDateStr();
 
   useEffect(() => {
     if (apartments.length > 0 && !apartments.some((a) => a.apartmentNo === violationApt)) {
@@ -104,6 +154,154 @@ export function AdminConsoleView({
       setViolationApt('');
     }
   }, [apartments, violationApt]);
+
+  const allReservations = overview?.reservations ?? [];
+  const allPenalties = overview?.penalties ?? [];
+
+  const filteredReservations = useMemo(() => {
+    const { startDate, endDate } = getDateRangeBounds(
+      resRange,
+      todayStr,
+      resCustomStart,
+      resCustomEnd
+    );
+    return allReservations.filter((r) => {
+      if (resFilter !== 'all' && r.status !== resFilter) return false;
+      return isDateStrInRange(r.dateStr, startDate, endDate);
+    });
+  }, [allReservations, resFilter, resRange, todayStr, resCustomStart, resCustomEnd]);
+
+  const filteredPenalties = useMemo(() => {
+    const { startDate, endDate } = getDateRangeBounds(
+      penaltyRange,
+      todayStr,
+      penaltyCustomStart,
+      penaltyCustomEnd
+    );
+    return allPenalties.filter((p) => {
+      if (penaltyTypeFilter !== 'all' && p.type !== penaltyTypeFilter) return false;
+      const pDateStr = getTodayIstanbulDateStr(p.createdAtMs);
+      return isDateStrInRange(pDateStr, startDate, endDate);
+    });
+  }, [
+    allPenalties,
+    penaltyTypeFilter,
+    penaltyRange,
+    todayStr,
+    penaltyCustomStart,
+    penaltyCustomEnd,
+  ]);
+
+  // Statistics aggregation
+  const stats = useMemo(() => {
+    const { startDate, endDate } = getDateRangeBounds(
+      statsRange,
+      todayStr,
+      statsCustomStart,
+      statsCustomEnd
+    );
+    const scopedRes = allReservations.filter((r) =>
+      isDateStrInRange(r.dateStr, startDate, endDate)
+    );
+    const scopedPenalties = allPenalties.filter((p) =>
+      isDateStrInRange(getTodayIstanbulDateStr(p.createdAtMs), startDate, endDate)
+    );
+
+    const totalBookings = scopedRes.length;
+    const activeOrCompleted = scopedRes.filter((r) => r.status === 'active').length;
+    const cancelledOntime = scopedRes.filter((r) => r.status === 'cancelled_ontime').length;
+    const cancelledLate = scopedRes.filter((r) => r.status === 'cancelled_late').length;
+    const totalCancelled = cancelledOntime + cancelledLate;
+    const cancelRatePct = totalBookings > 0 ? (totalCancelled / totalBookings) * 100 : 0;
+
+    const matchCount = scopedRes.filter((r) => r.playType === 'match').length;
+    const soloCount = scopedRes.filter((r) => r.playType === 'solo_training').length;
+    const primeCount = scopedRes.filter((r) => r.hour >= 18 && r.hour <= 20).length;
+    const primePct = totalBookings > 0 ? (primeCount / totalBookings) * 100 : 0;
+
+    // Per-apartment stats
+    const byAptMap = new Map<
+      string,
+      {
+        apartmentNo: string;
+        total: number;
+        active: number;
+        cancelled: number;
+        lateCancelled: number;
+      }
+    >();
+    for (const r of scopedRes) {
+      const entry = byAptMap.get(r.apartmentNo) ?? {
+        apartmentNo: r.apartmentNo,
+        total: 0,
+        active: 0,
+        cancelled: 0,
+        lateCancelled: 0,
+      };
+      entry.total += 1;
+      if (r.status === 'active') entry.active += 1;
+      if (r.status === 'cancelled_ontime') entry.cancelled += 1;
+      if (r.status === 'cancelled_late') {
+        entry.cancelled += 1;
+        entry.lateCancelled += 1;
+      }
+      byAptMap.set(r.apartmentNo, entry);
+    }
+
+    const topBookers = Array.from(byAptMap.values())
+      .sort((a, b) => b.total - a.total || b.active - a.active)
+      .slice(0, 8);
+
+    const topCancellers = Array.from(byAptMap.values())
+      .filter((a) => a.cancelled > 0)
+      .sort((a, b) => b.cancelled - a.cancelled || b.lateCancelled - a.lateCancelled)
+      .slice(0, 8);
+
+    // Per-hour stats (exclude cancelled or count all demand; count active demand + show total)
+    const hourCounts = Array.from({ length: 16 }, (_, i) => {
+      const hour = 7 + i;
+      const allAtHour = scopedRes.filter((r) => r.hour === hour);
+      const activeAtHour = allAtHour.filter((r) => r.status === 'active').length;
+      return {
+        hour,
+        label: formatHourRange(hour),
+        total: allAtHour.length,
+        active: activeAtHour,
+        isPrime: hour >= 18 && hour <= 20,
+      };
+    });
+    const topHours = [...hourCounts]
+      .filter((h) => h.total > 0)
+      .sort((a, b) => b.active - a.active || b.total - a.total);
+
+    const restrictedCount = apartments.filter((a) => Boolean(a.banUntilMs)).length;
+
+    return {
+      totalBookings,
+      activeOrCompleted,
+      cancelledOntime,
+      cancelledLate,
+      totalCancelled,
+      cancelRatePct,
+      matchCount,
+      soloCount,
+      primeCount,
+      primePct,
+      topBookers,
+      topCancellers,
+      topHours,
+      penaltyCount: scopedPenalties.length,
+      restrictedCount,
+    };
+  }, [
+    allReservations,
+    allPenalties,
+    apartments,
+    statsRange,
+    todayStr,
+    statsCustomStart,
+    statsCustomEnd,
+  ]);
 
   const handleSetupAdmin = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -157,8 +355,8 @@ export function AdminConsoleView({
           </h1>
           <p className="text-xs text-slate-600 leading-relaxed">
             {adminSetupNeeded
-              ? 'İlk kurulum için site yönetim şifresini belirleyin. Bu şifre daireleri elle eklemek, şifreleri görüntülemek ve denetim kayıtlarını girmek için kullanılacaktır.'
-              : 'Daire numaralarını elle eklemek, unutulan daire şifrelerini görüntülemek ve kort denetim kayıtlarını girmek için yönetici şifresini girin.'}
+              ? 'İlk kurulum için site yönetim şifresini belirleyin. Bu şifre şifre isteyen daireleri elle eklemek, unutulan şifreleri görüntülemek ve istatistikleri incelemek için kullanılacaktır.'
+              : 'Daire numaralarını elle eklemek, unutulan daire şifrelerini görüntülemek, istatistikleri ve denetim kayıtlarını incelemek için yönetici şifresini girin.'}
           </p>
         </div>
 
@@ -229,27 +427,21 @@ export function AdminConsoleView({
   const selectedViolationApt = apartments.find((a) => a.apartmentNo === violationApt);
   const isRepeatViolation = (selectedViolationApt?.nonResidentViolations ?? 0) >= 1;
 
-  const filteredReservations = (overview?.reservations ?? []).filter((r) => {
-    if (resFilter === 'active') return r.status === 'active';
-    if (resFilter === 'cancelled_late') return r.status === 'cancelled_late';
-    return true;
-  });
-
-  const handleBatchGenerate = async () => {
+  const handleCleanupUnassigned = async () => {
     setActionError(null);
     setActionSuccess(null);
     try {
-      const res = await api.adminBatchPasswords(session.token);
-      if (res.issued.length === 0) {
-        setActionSuccess('Tüm dairelerin zaten tanımlanmış şifresi bulunuyor.');
-      } else {
-        setIssuedList(res.issued);
-        setActionSuccess(`${res.issued.length} daire için yeni şifre oluşturuldu.`);
-        onRefreshAuthStatus();
-        await fetchOverview();
-      }
+      const res = await api.adminCleanupUnassigned(session.token);
+      setConfirmCleanupUnassigned(false);
+      setActionSuccess(
+        res.deletedCount > 0
+          ? `Şifresiz ${res.deletedCount} daire kaydı temizlendi.`
+          : 'Temizlenecek şifresiz daire bulunmadı.'
+      );
+      onRefreshAuthStatus();
+      await fetchOverview();
     } catch (err) {
-      setActionError(err instanceof ApiError ? err.message : 'Toplu şifre üretilemedi.');
+      setActionError(err instanceof ApiError ? err.message : 'Temizlik yapılamadı.');
     }
   };
 
@@ -372,6 +564,62 @@ export function AdminConsoleView({
     }
   };
 
+  const renderTimeFilterBar = (
+    value: TimeRangePreset,
+    onChangePreset: (p: TimeRangePreset) => void,
+    customStart: string,
+    onChangeStart: (v: string) => void,
+    customEnd: string,
+    onChangeEnd: (v: string) => void
+  ) => (
+    <div className="flex flex-wrap items-center gap-2">
+      <div className="flex flex-wrap items-center gap-1 p-1 bg-white border border-slate-200 rounded-xl">
+        {(
+          [
+            { id: 'today', label: 'Bugün' },
+            { id: '7d', label: 'Son 7 Gün' },
+            { id: '30d', label: 'Son 30 Gün' },
+            { id: 'all', label: 'Tümü' },
+            { id: 'custom', label: 'Tarih Seç' },
+          ] as const
+        ).map((item) => (
+          <button
+            key={item.id}
+            type="button"
+            onClick={() => onChangePreset(item.id)}
+            className={`min-h-[34px] px-2.5 py-1 text-xs font-medium rounded-lg whitespace-nowrap cursor-pointer ${
+              value === item.id
+                ? 'bg-emerald-700 text-white font-semibold'
+                : 'text-slate-600 hover:text-slate-900'
+            }`}
+          >
+            {item.label}
+          </button>
+        ))}
+      </div>
+
+      {value === 'custom' && (
+        <div className="flex flex-wrap items-center gap-1.5 text-xs">
+          <input
+            type="date"
+            aria-label="Başlangıç tarihi"
+            value={customStart}
+            onChange={(e) => onChangeStart(e.target.value)}
+            className="h-9 px-2.5 bg-white border border-slate-300 rounded-xl font-mono text-xs"
+          />
+          <span className="text-slate-400">–</span>
+          <input
+            type="date"
+            aria-label="Bitiş tarihi"
+            value={customEnd}
+            onChange={(e) => onChangeEnd(e.target.value)}
+            className="h-9 px-2.5 bg-white border border-slate-300 rounded-xl font-mono text-xs"
+          />
+        </div>
+      )}
+    </div>
+  );
+
   return (
     <div className="space-y-5 sm:space-y-6">
       <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-4">
@@ -380,17 +628,18 @@ export function AdminConsoleView({
             Soyak Siesta Yönetim Paneli
           </h1>
           <p className="text-xs text-slate-500 mt-1">
-            Daireleri elle ekleyin, unutulan şifreleri görüntüleyip paylaşın ve denetim kayıtlarını yönetin.
+            Şifre talep eden daireleri elle ekleyin, rezervasyon ve iptalleri filtreleyin, kullanım istatistiklerini izleyin.
           </p>
         </div>
 
         {/* Android Boxy Sub-Tab Switcher */}
-        <div className="grid grid-cols-3 gap-2">
+        <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
           {(
             [
               { id: 'apartments', label: 'Daireler', Icon: Building2 },
-              { id: 'violations', label: 'İhlal / Denetim', Icon: ShieldAlert },
               { id: 'reservations', label: 'Rezervasyonlar', Icon: CalendarDays },
+              { id: 'violations', label: 'İhlal / İptaller', Icon: ShieldAlert },
+              { id: 'stats', label: 'İstatistikler', Icon: BarChart3 },
             ] as const
           ).map((t) => {
             const Icon = t.Icon;
@@ -430,11 +679,9 @@ export function AdminConsoleView({
         <div className="bg-slate-900 text-white rounded-2xl p-4 sm:p-5 space-y-3">
           <div className="flex flex-wrap items-center justify-between gap-3">
             <div className="space-y-0.5">
-              <p className="text-xs font-bold text-emerald-400">
-                Tahsis Edilen Daire Şifresi
-              </p>
+              <p className="text-xs font-bold text-emerald-400">Tahsis Edilen Daire Şifresi</p>
               <p className="text-xs text-slate-300">
-                Şifreyi kopyalayıp daire sakiniyle paylaşabilirsiniz. Daha sonra da listeden görüntülenebilir.
+                Şifreyi kopyalayıp daire sakiniyle paylaşabilirsiniz. Listeden de her zaman görüntülenebilir.
               </p>
             </div>
             <div className="flex items-center gap-2">
@@ -443,7 +690,11 @@ export function AdminConsoleView({
                 onClick={handleCopyIssued}
                 className="min-h-[40px] inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium bg-slate-800 hover:bg-slate-700 border border-slate-700 rounded-xl cursor-pointer"
               >
-                {copiedAll ? <Check className="w-3.5 h-3.5 text-emerald-400" /> : <Copy className="w-3.5 h-3.5" />}
+                {copiedAll ? (
+                  <Check className="w-3.5 h-3.5 text-emerald-400" />
+                ) : (
+                  <Copy className="w-3.5 h-3.5" />
+                )}
                 <span>{copiedAll ? 'Kopyalandı' : 'Kopyala'}</span>
               </button>
               <button
@@ -480,10 +731,10 @@ export function AdminConsoleView({
             >
               <div className="space-y-0.5">
                 <h2 className="font-display text-sm font-bold text-slate-900">
-                  Yeni Daire / Blok Ekle (Elle Tanımlama)
+                  Şifre İsteyen Daire Ekle (Elle Tanımlama)
                 </h2>
                 <p className="text-xs text-slate-500">
-                  Soyak Siesta blok/daire formatını doğrudan girin (ör. B1-12, K2/4, C3-D8).
+                  Sitedeki 700 daire kalabalık oluşturmaması için yalnızca şifre talep eden daireler eklenir (ör. A7 12, B1-4).
                 </p>
               </div>
               <div className="flex flex-col sm:flex-row items-stretch sm:items-end gap-3">
@@ -496,7 +747,7 @@ export function AdminConsoleView({
                     type="text"
                     value={newAptNo}
                     onChange={(e) => setNewAptNo(e.target.value)}
-                    placeholder="Örn: B1-12 veya K2/4"
+                    placeholder="Örn: A7 12"
                     className="w-full h-11 px-3.5 border border-slate-300 rounded-xl text-sm font-mono focus:outline-none focus:ring-2 focus:ring-emerald-700"
                     required
                   />
@@ -524,26 +775,54 @@ export function AdminConsoleView({
               </div>
             </form>
 
-            {/* Batch Missing Passwords Box */}
+            {/* Directory Summary & Unassigned Cleanup */}
             <div className="lg:col-span-4 bg-white border border-slate-200 rounded-2xl p-4 sm:p-5 flex flex-col justify-between gap-3">
               <div className="space-y-1">
-                <p className="text-sm font-bold text-slate-900">Kayıtlı Daireler</p>
+                <p className="text-sm font-bold text-slate-900">Aktif Kullanıcı Sayısı</p>
                 <p className="text-xs text-slate-500">
-                  Toplam daire:{' '}
-                  <strong className="font-mono text-slate-900">{apartments.length}</strong>
+                  Şifreli daire:{' '}
+                  <strong className="font-mono text-slate-900">
+                    {apartments.length - missingPasswordCount}
+                  </strong>
                   {' · '}Şifresiz:{' '}
                   <strong className="font-mono text-slate-900">{missingPasswordCount}</strong>
                 </p>
               </div>
-              <button
-                type="button"
-                disabled={missingPasswordCount === 0}
-                onClick={handleBatchGenerate}
-                className="min-h-[44px] w-full inline-flex items-center justify-center gap-1.5 px-4 py-2 text-xs font-semibold text-white bg-slate-900 hover:bg-slate-800 disabled:opacity-40 rounded-xl whitespace-nowrap cursor-pointer"
-              >
-                <KeyRound className="w-4 h-4" aria-hidden="true" />
-                <span>Eksik Şifreleri Üret</span>
-              </button>
+
+              {missingPasswordCount > 0 ? (
+                confirmCleanupUnassigned ? (
+                  <div className="flex items-center gap-2">
+                    <button
+                      type="button"
+                      onClick={handleCleanupUnassigned}
+                      className="min-h-[44px] flex-1 px-3 py-2 text-xs font-semibold text-white bg-red-700 hover:bg-red-800 rounded-xl cursor-pointer"
+                    >
+                      {missingPasswordCount} Kaydı Sil
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setConfirmCleanupUnassigned(false)}
+                      className="min-h-[44px] px-3 py-2 text-xs font-medium text-slate-600 bg-slate-100 rounded-xl cursor-pointer"
+                    >
+                      Vazgeç
+                    </button>
+                  </div>
+                ) : (
+                  <button
+                    type="button"
+                    onClick={() => setConfirmCleanupUnassigned(true)}
+                    className="min-h-[44px] w-full inline-flex items-center justify-center gap-1.5 px-4 py-2 text-xs font-semibold text-red-700 bg-red-50 hover:bg-red-100 border border-red-200 rounded-xl whitespace-nowrap cursor-pointer"
+                  >
+                    <Trash2 className="w-4 h-4" aria-hidden="true" />
+                    <span>Şifresiz Kayıtları Temizle</span>
+                  </button>
+                )
+              ) : (
+                <div className="p-2.5 bg-emerald-50 border border-emerald-200 rounded-xl text-[11px] text-emerald-900 font-medium flex items-center gap-2">
+                  <KeyRound className="w-4 h-4 shrink-0 text-emerald-700" aria-hidden="true" />
+                  <span>Listede yalnızca şifre tahsis edilen daireler bulunuyor.</span>
+                </div>
+              )}
             </div>
           </div>
 
@@ -576,7 +855,7 @@ export function AdminConsoleView({
                 </div>
                 <p className="text-sm font-bold text-slate-900">Henüz kayıtlı daire bulunmuyor</p>
                 <p className="text-xs text-slate-500 max-w-md mx-auto">
-                  Soyak Siesta blok ve daire numaralarını yukarıdaki formdan tek tek ekleyebilirsiniz. Eklenen dairelerin şifreleri burada her zaman görüntülenebilir.
+                  Kort kullanmak isteyen dairelerin blok/daire numarasını (ör. A7 12) yukarıdaki formdan ekleyip şifre verebilirsiniz.
                 </p>
               </div>
             ) : (
@@ -594,8 +873,10 @@ export function AdminConsoleView({
                               {apt.residentLabel}
                             </p>
                             <p className="text-[11px] text-slate-500 mt-0.5">
-                              15G Geç İptal: <strong className="font-mono">{apt.lateCancelsLast15d}</strong>
-                              {' · '}Sakini İhlali: <strong className="font-mono">{apt.nonResidentViolations}</strong>
+                              15G Geç İptal:{' '}
+                              <strong className="font-mono">{apt.lateCancelsLast15d}</strong>
+                              {' · '}Sakini İhlali:{' '}
+                              <strong className="font-mono">{apt.nonResidentViolations}</strong>
                             </p>
                           </div>
                           {apt.banUntilMs ? (
@@ -636,7 +917,11 @@ export function AdminConsoleView({
                                 aria-label={isRevealed ? 'Şifreyi gizle' : 'Şifreyi göster'}
                                 className="min-w-[40px] min-h-[40px] flex items-center justify-center bg-white border border-slate-200 rounded-xl text-slate-700 cursor-pointer"
                               >
-                                {isRevealed ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                                {isRevealed ? (
+                                  <EyeOff className="w-4 h-4" />
+                                ) : (
+                                  <Eye className="w-4 h-4" />
+                                )}
                               </button>
                               <button
                                 type="button"
@@ -918,7 +1203,163 @@ export function AdminConsoleView({
         </div>
       )}
 
-      {/* Sub-tab 2: Violations & Non-Resident Inspections */}
+      {/* Sub-tab 2: All Reservations with Time & Status Filters */}
+      {subTab === 'reservations' && (
+        <div className="bg-white border border-slate-200 rounded-2xl overflow-hidden">
+          <div className="px-4 sm:px-5 py-4 border-b border-slate-200 bg-slate-50 space-y-3">
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <div>
+                <h2 className="font-display text-sm font-bold text-slate-900">
+                  Site Geneli Rezervasyon Listesi
+                </h2>
+                <p className="text-[11px] text-slate-500 font-mono">
+                  {filteredReservations.length} kayıt gösteriliyor
+                </p>
+              </div>
+              <div className="flex flex-wrap items-center gap-1 p-1 bg-white border border-slate-200 rounded-xl">
+                {(
+                  [
+                    { id: 'all', label: 'Tümü' },
+                    { id: 'active', label: 'Aktif' },
+                    { id: 'cancelled_ontime', label: 'Ücretsiz İptal' },
+                    { id: 'cancelled_late', label: 'Geç İptaller' },
+                  ] as const
+                ).map((f) => (
+                  <button
+                    key={f.id}
+                    type="button"
+                    onClick={() => setResFilter(f.id)}
+                    className={`min-h-[34px] px-2.5 py-1 text-xs rounded-lg font-medium whitespace-nowrap cursor-pointer ${
+                      resFilter === f.id
+                        ? 'bg-slate-900 text-white'
+                        : 'text-slate-600 hover:text-slate-900'
+                    }`}
+                  >
+                    {f.label}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            {renderTimeFilterBar(
+              resRange,
+              setResRange,
+              resCustomStart,
+              setResCustomStart,
+              resCustomEnd,
+              setResCustomEnd
+            )}
+          </div>
+
+          {filteredReservations.length === 0 ? (
+            <div className="p-6 text-xs sm:text-sm text-slate-500">
+              Seçili zaman aralığı ve duruma uygun rezervasyon bulunmamaktadır.
+            </div>
+          ) : (
+            <>
+              {/* Mobile Boxy Reservation Cards */}
+              <div className="md:hidden divide-y divide-slate-200">
+                {filteredReservations.map((r) => (
+                  <div key={r.id} className="p-4 flex items-center justify-between gap-3">
+                    <div className="space-y-0.5">
+                      <p className="text-xs font-bold text-slate-900">
+                        Daire {r.apartmentNo} ·{' '}
+                        <span className="font-mono text-slate-500">#{r.id}</span>
+                      </p>
+                      <p className="font-mono text-xs text-slate-700">
+                        {r.dateStr} · {formatHourRange(r.hour)}
+                      </p>
+                      <p className="text-[11px] text-slate-500">
+                        {r.playType === 'solo_training' ? 'Bireysel Antrenman' : 'Maç'} ·{' '}
+                        <span
+                          className={
+                            r.status === 'active'
+                              ? 'text-emerald-800 font-semibold'
+                              : r.status === 'cancelled_late'
+                              ? 'text-amber-800 font-semibold'
+                              : 'text-slate-500'
+                          }
+                        >
+                          {r.status === 'active'
+                            ? 'Aktif'
+                            : r.status === 'cancelled_late'
+                            ? 'Geç İptal'
+                            : 'Ücretsiz İptal'}
+                        </span>
+                      </p>
+                    </div>
+                    {r.status === 'active' && (
+                      <button
+                        type="button"
+                        onClick={() => handleAdminCancelRes(r.id)}
+                        className="min-h-[40px] px-3 text-xs font-semibold text-red-700 bg-red-50 border border-red-200 rounded-xl shrink-0 cursor-pointer"
+                      >
+                        İptal Et
+                      </button>
+                    )}
+                  </div>
+                ))}
+              </div>
+
+              {/* Desktop Table */}
+              <div className="hidden md:block overflow-x-auto">
+                <table className="w-full text-left text-xs">
+                  <thead className="bg-slate-50/70 border-b border-slate-200 text-slate-500">
+                    <tr>
+                      <th className="px-5 py-3 font-medium">ID</th>
+                      <th className="px-5 py-3 font-medium">Daire</th>
+                      <th className="px-5 py-3 font-medium">Tarih</th>
+                      <th className="px-5 py-3 font-medium">Saat</th>
+                      <th className="px-5 py-3 font-medium">Tür</th>
+                      <th className="px-5 py-3 font-medium">Durum</th>
+                      <th className="px-5 py-3 font-medium text-right">Yönetim İşlemi</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-200">
+                    {filteredReservations.map((r) => (
+                      <tr key={r.id} className="hover:bg-slate-50">
+                        <td className="px-5 py-3 font-mono text-slate-500">#{r.id}</td>
+                        <td className="px-5 py-3 font-semibold text-slate-900">
+                          Daire {r.apartmentNo}
+                        </td>
+                        <td className="px-5 py-3 font-mono text-slate-700">{r.dateStr}</td>
+                        <td className="px-5 py-3 font-mono text-slate-700">
+                          {formatHourRange(r.hour)}
+                        </td>
+                        <td className="px-5 py-3 text-slate-600">
+                          {r.playType === 'solo_training' ? 'Bireysel Antrenman' : 'Maç'}
+                        </td>
+                        <td className="px-5 py-3">
+                          {r.status === 'active' ? (
+                            <span className="font-medium text-emerald-800">Aktif</span>
+                          ) : r.status === 'cancelled_late' ? (
+                            <span className="font-medium text-amber-800">Geç İptal</span>
+                          ) : (
+                            <span className="text-slate-500">Ücretsiz İptal</span>
+                          )}
+                        </td>
+                        <td className="px-5 py-3 text-right">
+                          {r.status === 'active' && (
+                            <button
+                              type="button"
+                              onClick={() => handleAdminCancelRes(r.id)}
+                              className="px-2.5 py-1.5 text-[11px] font-medium text-red-700 bg-red-50 hover:bg-red-100 border border-red-200 rounded-lg cursor-pointer"
+                            >
+                              İptal Et
+                            </button>
+                          )}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </>
+          )}
+        </div>
+      )}
+
+      {/* Sub-tab 3: Violations & Late Cancellations with Time Filter */}
       {subTab === 'violations' && (
         <div className="grid grid-cols-1 lg:grid-cols-12 gap-5 items-start">
           <form
@@ -1018,26 +1459,65 @@ export function AdminConsoleView({
                   type="submit"
                   className="min-h-[48px] w-full py-2.5 text-xs font-semibold text-white bg-red-700 hover:bg-red-800 rounded-xl transition-colors cursor-pointer"
                 >
-                  {isRepeatViolation ? 'Tekrar İhlal ve 1 Ay Kısıtlama Uygula' : 'İlk Tespit Uyarısı Kaydet'}
+                  {isRepeatViolation
+                    ? 'Tekrar İhlal ve 1 Ay Kısıtlama Uygula'
+                    : 'İlk Tespit Uyarısı Kaydet'}
                 </button>
               </>
             )}
           </form>
 
           <div className="lg:col-span-7 bg-white border border-slate-200 rounded-2xl overflow-hidden">
-            <div className="px-5 py-4 border-b border-slate-200 bg-slate-50">
-              <h2 className="font-display text-sm font-bold text-slate-900">
-                Tüm İhlal ve Geç İptal Kayıtları
-              </h2>
+            <div className="px-5 py-4 border-b border-slate-200 bg-slate-50 space-y-3">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <h2 className="font-display text-sm font-bold text-slate-900">
+                  İhlal ve Geç İptal Kayıtları ({filteredPenalties.length})
+                </h2>
+                <div className="flex items-center gap-1 p-1 bg-white border border-slate-200 rounded-xl">
+                  {(
+                    [
+                      { id: 'all', label: 'Tümü' },
+                      { id: 'late_cancellation', label: 'Geç İptal' },
+                      { id: 'non_resident_violation', label: 'Sakini İhlali' },
+                    ] as const
+                  ).map((f) => (
+                    <button
+                      key={f.id}
+                      type="button"
+                      onClick={() => setPenaltyTypeFilter(f.id)}
+                      className={`min-h-[32px] px-2.5 py-1 text-xs rounded-lg font-medium whitespace-nowrap cursor-pointer ${
+                        penaltyTypeFilter === f.id
+                          ? 'bg-slate-900 text-white'
+                          : 'text-slate-600 hover:text-slate-900'
+                      }`}
+                    >
+                      {f.label}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              {renderTimeFilterBar(
+                penaltyRange,
+                setPenaltyRange,
+                penaltyCustomStart,
+                setPenaltyCustomStart,
+                penaltyCustomEnd,
+                setPenaltyCustomEnd
+              )}
             </div>
-            {(overview?.penalties ?? []).length === 0 ? (
+
+            {filteredPenalties.length === 0 ? (
               <div className="p-6 text-xs sm:text-sm text-slate-500">
-                Henüz kayıtlı ihlal veya geç iptal yaptırımı bulunmuyor.
+                Seçili filtreye uygun ihlal veya geç iptal yaptırımı bulunmuyor.
               </div>
             ) : (
               <div className="divide-y divide-slate-200">
-                {(overview?.penalties ?? []).map((p) => (
-                  <div key={p.id} className="p-4 sm:px-6 flex flex-col sm:flex-row sm:items-start justify-between gap-2.5">
+                {filteredPenalties.map((p) => (
+                  <div
+                    key={p.id}
+                    className="p-4 sm:px-6 flex flex-col sm:flex-row sm:items-start justify-between gap-2.5"
+                  >
                     <div className="space-y-1">
                       <div className="flex flex-wrap items-center gap-2 text-xs font-semibold">
                         <ShieldAlert
@@ -1052,7 +1532,13 @@ export function AdminConsoleView({
                           {p.type === 'late_cancellation'
                             ? 'Geç İptal'
                             : 'Daire Sakini İhlali'}{' '}
-                          ({p.action === 'warning' ? 'Uyarı' : p.action === 'ban_7d' ? '1 Hafta Ban' : '1 Ay Ban'})
+                          (
+                          {p.action === 'warning'
+                            ? 'Uyarı'
+                            : p.action === 'ban_7d'
+                            ? '1 Hafta Ban'
+                            : '1 Ay Ban'}
+                          )
                         </span>
                         {p.feeAmount && (
                           <span className="font-mono text-red-800">· Ceza: {p.feeAmount}</span>
@@ -1071,141 +1557,248 @@ export function AdminConsoleView({
         </div>
       )}
 
-      {/* Sub-tab 3: All Reservations */}
-      {subTab === 'reservations' && (
-        <div className="bg-white border border-slate-200 rounded-2xl overflow-hidden">
-          <div className="px-4 sm:px-5 py-3.5 border-b border-slate-200 bg-slate-50 flex flex-wrap items-center justify-between gap-3">
-            <h2 className="font-display text-sm font-bold text-slate-900">
-              Site Geneli Rezervasyon Listesi
-            </h2>
-            <div className="flex items-center gap-1 p-1 bg-white border border-slate-200 rounded-xl">
-              {(
-                [
-                  { id: 'all', label: 'Tümü' },
-                  { id: 'active', label: 'Aktif' },
-                  { id: 'cancelled_late', label: 'Geç İptaller' },
-                ] as const
-              ).map((f) => (
-                <button
-                  key={f.id}
-                  type="button"
-                  onClick={() => setResFilter(f.id)}
-                  className={`min-h-[36px] px-3 py-1 text-xs rounded-lg font-medium cursor-pointer ${
-                    resFilter === f.id
-                      ? 'bg-slate-900 text-white'
-                      : 'text-slate-600 hover:text-slate-900'
-                  }`}
-                >
-                  {f.label}
-                </button>
-              ))}
+      {/* Sub-tab 4: Statistics Dashboard */}
+      {subTab === 'stats' && (
+        <div className="space-y-5">
+          {/* Optional Time Selector Bar */}
+          <div className="bg-white border border-slate-200 rounded-2xl p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+            <div>
+              <h2 className="font-display text-sm font-bold text-slate-900">
+                Kort Kullanım ve İptal İstatistikleri
+              </h2>
+              <p className="text-xs text-slate-500">
+                Site genelinde toplanan rezervasyon, yoğun saat ve iptal verileri
+              </p>
+            </div>
+            {renderTimeFilterBar(
+              statsRange,
+              setStatsRange,
+              statsCustomStart,
+              setStatsCustomStart,
+              statsCustomEnd,
+              setStatsCustomEnd
+            )}
+          </div>
+
+          {/* 4 Boxy KPI Tiles */}
+          <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
+            <div className="bg-white border border-slate-200 rounded-2xl p-4 space-y-1.5">
+              <span className="text-[11px] font-medium text-slate-500">Toplam Rezervasyon</span>
+              <p className="font-mono text-2xl font-bold text-slate-900 tabular-nums">
+                {stats.totalBookings}
+              </p>
+              <p className="text-[11px] text-slate-500">
+                Aktif / Tamamlanan: <strong className="font-mono">{stats.activeOrCompleted}</strong>
+              </p>
+            </div>
+
+            <div className="bg-white border border-slate-200 rounded-2xl p-4 space-y-1.5">
+              <span className="text-[11px] font-medium text-slate-500">İptal Sıklığı / Oranı</span>
+              <p className="font-mono text-2xl font-bold text-amber-800 tabular-nums">
+                %{stats.cancelRatePct.toFixed(1)}
+              </p>
+              <p className="text-[11px] text-slate-500">
+                {stats.totalCancelled} iptal ({stats.cancelledLate} geç · {stats.cancelledOntime}{' '}
+                ücretsiz)
+              </p>
+            </div>
+
+            <div className="bg-white border border-slate-200 rounded-2xl p-4 space-y-1.5">
+              <span className="text-[11px] font-medium text-slate-500">Yoğun Saat (18–21) Payı</span>
+              <p className="font-mono text-2xl font-bold text-emerald-800 tabular-nums">
+                %{stats.primePct.toFixed(1)}
+              </p>
+              <p className="text-[11px] text-slate-500">
+                {stats.primeCount} kayıt yoğun saatte
+              </p>
+            </div>
+
+            <div className="bg-white border border-slate-200 rounded-2xl p-4 space-y-1.5">
+              <span className="text-[11px] font-medium text-slate-500">Yaptırım & Kısıtlama</span>
+              <p className="font-mono text-2xl font-bold text-red-700 tabular-nums">
+                {stats.penaltyCount}
+              </p>
+              <p className="text-[11px] text-slate-500">
+                Aktif kısıtlı daire: <strong className="font-mono">{stats.restrictedCount}</strong>
+              </p>
             </div>
           </div>
 
-          {filteredReservations.length === 0 ? (
-            <div className="p-6 text-xs sm:text-sm text-slate-500">
-              Seçili filtreye uygun rezervasyon bulunmamaktadır.
-            </div>
-          ) : (
-            <>
-              {/* Mobile Boxy Reservation Cards */}
-              <div className="md:hidden divide-y divide-slate-200">
-                {filteredReservations.map((r) => (
-                  <div key={r.id} className="p-4 flex items-center justify-between gap-3">
-                    <div className="space-y-0.5">
-                      <p className="text-xs font-bold text-slate-900">
-                        Daire {r.apartmentNo} · <span className="font-mono text-slate-500">#{r.id}</span>
-                      </p>
-                      <p className="font-mono text-xs text-slate-700">
-                        {r.dateStr} · {formatHourRange(r.hour)}
-                      </p>
-                      <p className="text-[11px] text-slate-500">
-                        {r.playType === 'solo_training' ? 'Bireysel Antrenman' : 'Maç'} ·{' '}
-                        <span
-                          className={
-                            r.status === 'active'
-                              ? 'text-emerald-800 font-semibold'
-                              : r.status === 'cancelled_late'
-                              ? 'text-amber-800 font-semibold'
-                              : 'text-slate-500'
-                          }
-                        >
-                          {r.status === 'active'
-                            ? 'Aktif'
-                            : r.status === 'cancelled_late'
-                            ? 'Geç İptal'
-                            : 'İptal'}
-                        </span>
-                      </p>
-                    </div>
-                    {r.status === 'active' && (
-                      <button
-                        type="button"
-                        onClick={() => handleAdminCancelRes(r.id)}
-                        className="min-h-[40px] px-3 text-xs font-semibold text-red-700 bg-red-50 border border-red-200 rounded-xl shrink-0 cursor-pointer"
-                      >
-                        İptal Et
-                      </button>
-                    )}
-                  </div>
-                ))}
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+            {/* Top Booking Apartments */}
+            <section className="bg-white border border-slate-200 rounded-2xl overflow-hidden">
+              <div className="px-5 py-3.5 border-b border-slate-200 bg-slate-50">
+                <h3 className="font-display text-sm font-bold text-slate-900">
+                  En Çok Rezervasyon Yapan Daireler
+                </h3>
               </div>
+              {stats.topBookers.length === 0 ? (
+                <div className="p-6 text-xs text-slate-500">
+                  Seçili dönem için henüz rezervasyon verisi bulunmuyor.
+                </div>
+              ) : (
+                <div className="p-5 space-y-3">
+                  {stats.topBookers.map((item, idx) => {
+                    const maxTotal = stats.topBookers[0]?.total || 1;
+                    const widthPct = Math.round((item.total / maxTotal) * 100);
+                    return (
+                      <div key={item.apartmentNo} className="space-y-1">
+                        <div className="flex items-center justify-between text-xs">
+                          <span className="font-semibold text-slate-900">
+                            {idx + 1}. Daire {item.apartmentNo}
+                          </span>
+                          <span className="font-mono text-slate-700">
+                            <strong>{item.total}</strong> kayıt ({item.active} aktif)
+                          </span>
+                        </div>
+                        <div className="h-2.5 bg-slate-100 rounded-lg overflow-hidden">
+                          <div
+                            className="h-full bg-emerald-700 rounded-lg"
+                            style={{ width: `${widthPct}%` }}
+                          />
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </section>
 
-              {/* Desktop Table */}
-              <div className="hidden md:block overflow-x-auto">
-                <table className="w-full text-left text-xs">
-                  <thead className="bg-slate-50/70 border-b border-slate-200 text-slate-500">
-                    <tr>
-                      <th className="px-5 py-3 font-medium">ID</th>
-                      <th className="px-5 py-3 font-medium">Daire</th>
-                      <th className="px-5 py-3 font-medium">Tarih</th>
-                      <th className="px-5 py-3 font-medium">Saat</th>
-                      <th className="px-5 py-3 font-medium">Tür</th>
-                      <th className="px-5 py-3 font-medium">Durum</th>
-                      <th className="px-5 py-3 font-medium text-right">Yönetim İşlemi</th>
-                    </tr>
-                  </thead>
-                  <tbody className="divide-y divide-slate-200">
-                    {filteredReservations.map((r) => (
-                      <tr key={r.id} className="hover:bg-slate-50">
-                        <td className="px-5 py-3 font-mono text-slate-500">#{r.id}</td>
-                        <td className="px-5 py-3 font-semibold text-slate-900">
-                          Daire {r.apartmentNo}
-                        </td>
-                        <td className="px-5 py-3 font-mono text-slate-700">{r.dateStr}</td>
-                        <td className="px-5 py-3 font-mono text-slate-700">
-                          {formatHourRange(r.hour)}
-                        </td>
-                        <td className="px-5 py-3 text-slate-600">
-                          {r.playType === 'solo_training' ? 'Bireysel Antrenman' : 'Maç'}
-                        </td>
-                        <td className="px-5 py-3">
-                          {r.status === 'active' ? (
-                            <span className="font-medium text-emerald-800">Aktif</span>
-                          ) : r.status === 'cancelled_late' ? (
-                            <span className="font-medium text-amber-800">Geç İptal</span>
-                          ) : (
-                            <span className="text-slate-500">İptal</span>
-                          )}
-                        </td>
-                        <td className="px-5 py-3 text-right">
-                          {r.status === 'active' && (
-                            <button
-                              type="button"
-                              onClick={() => handleAdminCancelRes(r.id)}
-                              className="px-2.5 py-1.5 text-[11px] font-medium text-red-700 bg-red-50 hover:bg-red-100 border border-red-200 rounded-lg cursor-pointer"
-                            >
-                              İptal Et
-                            </button>
-                          )}
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
+            {/* Most Frequently Used Hours */}
+            <section className="bg-white border border-slate-200 rounded-2xl overflow-hidden">
+              <div className="px-5 py-3.5 border-b border-slate-200 bg-slate-50">
+                <h3 className="font-display text-sm font-bold text-slate-900">
+                  En Sık Kullanılan Saatler
+                </h3>
               </div>
-            </>
-          )}
+              {stats.topHours.length === 0 ? (
+                <div className="p-6 text-xs text-slate-500">
+                  Seçili dönem için saat dağılımı verisi bulunmuyor.
+                </div>
+              ) : (
+                <div className="p-5 space-y-3">
+                  {stats.topHours.slice(0, 8).map((item) => {
+                    const maxVal = stats.topHours[0]?.total || 1;
+                    const widthPct = Math.round((item.total / maxVal) * 100);
+                    return (
+                      <div key={item.hour} className="space-y-1">
+                        <div className="flex items-center justify-between text-xs">
+                          <span className="font-mono font-bold text-slate-900">
+                            {item.label}{' '}
+                            {item.isPrime && (
+                              <span className="font-sans font-medium text-amber-700">
+                                · Yoğun
+                              </span>
+                            )}
+                          </span>
+                          <span className="font-mono text-slate-700">
+                            <strong>{item.total}</strong> rezervasyon ({item.active} gerçekleşen/aktif)
+                          </span>
+                        </div>
+                        <div className="h-2.5 bg-slate-100 rounded-lg overflow-hidden">
+                          <div
+                            className={`h-full rounded-lg ${
+                              item.isPrime ? 'bg-amber-600' : 'bg-slate-800'
+                            }`}
+                            style={{ width: `${widthPct}%` }}
+                          />
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </section>
+
+            {/* Top Cancelling Apartments & Cancellation Frequency */}
+            <section className="bg-white border border-slate-200 rounded-2xl overflow-hidden">
+              <div className="px-5 py-3.5 border-b border-slate-200 bg-slate-50">
+                <h3 className="font-display text-sm font-bold text-slate-900">
+                  En Çok İptal Eden Daireler ve İptal Sıklığı
+                </h3>
+              </div>
+              {stats.topCancellers.length === 0 ? (
+                <div className="p-6 text-xs text-slate-500">
+                  Seçili dönem için iptal kaydı bulunmuyor.
+                </div>
+              ) : (
+                <div className="divide-y divide-slate-200">
+                  {stats.topCancellers.map((item) => {
+                    const aptCancelPct =
+                      item.total > 0 ? Math.round((item.cancelled / item.total) * 100) : 0;
+                    return (
+                      <div
+                        key={item.apartmentNo}
+                        className="px-5 py-3 flex items-center justify-between gap-3 text-xs"
+                      >
+                        <div>
+                          <p className="font-bold text-slate-900">Daire {item.apartmentNo}</p>
+                          <p className="text-[11px] text-slate-500">
+                            {item.total} rezervasyonda {item.cancelled} iptal (%{aptCancelPct})
+                          </p>
+                        </div>
+                        <div className="text-right font-mono">
+                          <span className="font-bold text-red-700">{item.cancelled} iptal</span>
+                          {item.lateCancelled > 0 && (
+                            <p className="text-[11px] text-amber-800">
+                              {item.lateCancelled} geç iptal
+                            </p>
+                          )}
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </section>
+
+            {/* Play Type Distribution */}
+            <section className="bg-white border border-slate-200 rounded-2xl overflow-hidden">
+              <div className="px-5 py-3.5 border-b border-slate-200 bg-slate-50">
+                <h3 className="font-display text-sm font-bold text-slate-900">
+                  Kullanım Türü Dağılımı
+                </h3>
+              </div>
+              <div className="p-5 space-y-4">
+                <div className="grid grid-cols-2 gap-3">
+                  <div className="p-3.5 bg-slate-50 border border-slate-200 rounded-xl">
+                    <span className="text-[11px] text-slate-500">Eşli / Grup Maçı</span>
+                    <p className="font-mono text-xl font-bold text-slate-900 mt-1">
+                      {stats.matchCount}
+                    </p>
+                  </div>
+                  <div className="p-3.5 bg-slate-50 border border-slate-200 rounded-xl">
+                    <span className="text-[11px] text-slate-500">Bireysel Antrenman</span>
+                    <p className="font-mono text-xl font-bold text-emerald-800 mt-1">
+                      {stats.soloCount}
+                    </p>
+                  </div>
+                </div>
+                {stats.totalBookings > 0 && (
+                  <div className="space-y-1.5">
+                    <div className="h-3 bg-slate-100 rounded-lg overflow-hidden flex">
+                      <div
+                        className="bg-slate-900 h-full"
+                        style={{
+                          width: `${Math.round((stats.matchCount / stats.totalBookings) * 100)}%`,
+                        }}
+                      />
+                      <div
+                        className="bg-emerald-700 h-full"
+                        style={{
+                          width: `${Math.round((stats.soloCount / stats.totalBookings) * 100)}%`,
+                        }}
+                      />
+                    </div>
+                    <p className="text-[11px] text-slate-500 font-mono">
+                      Maç: %{Math.round((stats.matchCount / stats.totalBookings) * 100)} · Antrenman: %
+                      {Math.round((stats.soloCount / stats.totalBookings) * 100)}
+                    </p>
+                  </div>
+                )}
+              </div>
+            </section>
+          </div>
         </div>
       )}
     </div>

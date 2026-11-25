@@ -5,10 +5,11 @@ import {
   LogIn,
   LogOut,
   ShieldCheck,
+  Users,
 } from 'lucide-react';
 import type { AuthSession } from '../shared/types';
 
-export type ActiveTab = 'schedule' | 'portal' | 'rules' | 'admin';
+export type ActiveTab = 'schedule' | 'portal' | 'partners' | 'rules' | 'admin';
 
 interface HeaderProps {
   activeTab: ActiveTab;
@@ -36,7 +37,8 @@ export function Header({
     Icon: typeof CalendarDays;
   }[] = [
     { id: 'schedule', label: 'Kort Programı', mobileLabel: 'Program', Icon: CalendarDays },
-    { id: 'portal', label: 'Rezervasyonlarım', mobileLabel: 'Kayıtlarım', Icon: ClipboardList },
+    { id: 'portal', label: 'Rezervasyonlarım', mobileLabel: 'Kayıtlar', Icon: ClipboardList },
+    { id: 'partners', label: 'Oyun Arkadaşı', mobileLabel: 'Partner', Icon: Users },
     { id: 'rules', label: 'Kurallar', mobileLabel: 'Kurallar', Icon: BookOpen },
     ...(!isResident
       ? [{ id: 'admin' as ActiveTab, label: 'Yönetim', mobileLabel: 'Yönetim', Icon: ShieldCheck }]
@@ -61,7 +63,7 @@ export function Header({
                 className="h-6 sm:h-7 w-auto object-contain"
               />
             </div>
-            <span className="hidden sm:inline-block font-display text-sm font-bold tracking-tight text-slate-900 whitespace-nowrap">
+            <span className="hidden lg:inline-block font-display text-sm font-bold tracking-tight text-slate-900 whitespace-nowrap">
               Tenis Kortu
             </span>
           </button>
@@ -69,7 +71,7 @@ export function Header({
           {/* Desktop Navigation */}
           <nav
             aria-label="Ana menü"
-            className="hidden md:flex items-center gap-2 text-sm font-medium"
+            className="hidden md:flex items-center gap-1.5 lg:gap-2 text-xs lg:text-sm font-medium"
           >
             {navItems.map((item) => {
               const isActive = activeTab === item.id;
@@ -79,7 +81,7 @@ export function Header({
                   key={item.id}
                   type="button"
                   onClick={() => onSelectTab(item.id)}
-                  className={`inline-flex items-center gap-2 px-3.5 py-2 rounded-xl transition-colors whitespace-nowrap shrink-0 cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-700 ${
+                  className={`inline-flex items-center gap-1.5 px-3 py-2 rounded-xl transition-colors whitespace-nowrap shrink-0 cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-700 ${
                     isActive
                       ? 'bg-emerald-50 text-emerald-900 border border-emerald-200 font-semibold'
                       : 'text-slate-600 hover:text-slate-900 hover:bg-slate-100 border border-transparent'
@@ -127,8 +129,8 @@ export function Header({
       {/* Android-style Fixed Bottom Navigation Bar (Mobile only) */}
       <nav
         aria-label="Mobil alt menü"
-        className={`md:hidden fixed bottom-0 left-0 right-0 z-40 bg-white/95 backdrop-blur-md border-t border-slate-200 px-2 py-1.5 grid gap-1 ${
-          navItems.length === 3 ? 'grid-cols-3' : 'grid-cols-4'
+        className={`md:hidden fixed bottom-0 left-0 right-0 z-40 bg-white/95 backdrop-blur-md border-t border-slate-200 px-1.5 py-1.5 grid gap-1 ${
+          navItems.length === 4 ? 'grid-cols-4' : 'grid-cols-5'
         }`}
       >
         {navItems.map((item) => {
@@ -139,10 +141,10 @@ export function Header({
               key={item.id}
               type="button"
               onClick={() => onSelectTab(item.id)}
-              className="flex flex-col items-center justify-center min-h-[48px] py-1 px-1 rounded-xl transition-colors cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-700"
+              className="flex flex-col items-center justify-center min-h-[48px] py-1 px-0.5 rounded-xl transition-colors cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-700"
             >
               <div
-                className={`w-12 h-7 rounded-xl flex items-center justify-center transition-colors ${
+                className={`w-11 h-7 rounded-xl flex items-center justify-center transition-colors ${
                   isActive
                     ? 'bg-emerald-700 text-white'
                     : 'bg-slate-100 text-slate-600'
@@ -151,7 +153,7 @@ export function Header({
                 <Icon className="w-4 h-4" aria-hidden="true" />
               </div>
               <span
-                className={`text-[11px] mt-1 leading-none whitespace-nowrap ${
+                className={`text-[10px] mt-1 leading-none whitespace-nowrap ${
                   isActive ? 'font-bold text-emerald-900' : 'font-medium text-slate-600'
                 }`}
               >

@@ -3,6 +3,7 @@ import type { PlayType, SlotEligibility } from '../shared/types.ts';
 export const COURT_OPEN_HOUR = 7;
 export const COURT_CLOSE_HOUR = 23; // last slot starts at 22:00 and ends at 23:00
 export const PRIME_HOURS = new Set([18, 19, 20]);
+export const PRIME_OVERRIDE_HOUR = 15;
 export const MAX_BOOKING_DAYS_AHEAD = 6;
 export const FREE_CANCEL_HOURS = 4;
 export const LATE_CANCEL_WINDOW_DAYS = 15;
@@ -103,7 +104,7 @@ export function evaluateSlotEligibility(params: {
       bookable: false,
       reason: 'Bu saat dilimi sona ermiştir.',
       primeTime,
-      sixteenHourOverrideUsed: false,
+      primeOverrideUsed: false,
       soloTrainingAllowed,
     };
   }
@@ -115,7 +116,7 @@ export function evaluateSlotEligibility(params: {
       bookable: false,
       reason: `Rezervasyonlar en fazla ${MAX_BOOKING_DAYS_AHEAD + 1} günlük takvim için açılır.`,
       primeTime,
-      sixteenHourOverrideUsed: false,
+      primeOverrideUsed: false,
       soloTrainingAllowed,
     };
   }
@@ -125,7 +126,7 @@ export function evaluateSlotEligibility(params: {
       bookable: false,
       reason: 'Bu saat dilimi başka bir daire tarafından rezerve edilmiştir.',
       primeTime,
-      sixteenHourOverrideUsed: false,
+      primeOverrideUsed: false,
       soloTrainingAllowed,
     };
   }
@@ -136,7 +137,7 @@ export function evaluateSlotEligibility(params: {
       bookable: false,
       reason: `${apt.banReason || 'Rezervasyon kısıtlaması'} nedeniyle ${untilClock.label} tarihine kadar rezervasyon yapılamaz.`,
       primeTime,
-      sixteenHourOverrideUsed: false,
+      primeOverrideUsed: false,
       soloTrainingAllowed,
     };
   }
@@ -146,7 +147,7 @@ export function evaluateSlotEligibility(params: {
       bookable: false,
       reason: 'Mevcut rezervasyon saatiniz tamamlanmadan yeni rezervasyon oluşturulamaz.',
       primeTime,
-      sixteenHourOverrideUsed: false,
+      primeOverrideUsed: false,
       soloTrainingAllowed,
     };
   }
@@ -156,7 +157,7 @@ export function evaluateSlotEligibility(params: {
       bookable: false,
       reason: 'Aynı gün içinde birden fazla rezervasyon yapılamaz.',
       primeTime,
-      sixteenHourOverrideUsed: false,
+      primeOverrideUsed: false,
       soloTrainingAllowed,
     };
   }
@@ -166,23 +167,22 @@ export function evaluateSlotEligibility(params: {
       bookable: false,
       reason: '18:00 - 21:00 yoğun saat aralığında bireysel antrenman rezervasyonu yapılamaz.',
       primeTime,
-      sixteenHourOverrideUsed: false,
+      primeOverrideUsed: false,
       soloTrainingAllowed,
     };
   }
 
-  let sixteenHourOverrideUsed = false;
+  let primeOverrideUsed = false;
   if (primeTime && apt.hasAdjacentDayPrimeBooking) {
-    const isTodayAfter16 = targetDateStr === clock.dateStr && clock.hour >= 16;
-    if (isTodayAfter16) {
-      sixteenHourOverrideUsed = true;
+    const isTodayAfterCutoff = targetDateStr === clock.dateStr && clock.hour >= PRIME_OVERRIDE_HOUR;
+    if (isTodayAfterCutoff) {
+      primeOverrideUsed = true;
     } else {
       return {
         bookable: false,
-        reason:
-          '18:00 - 21:00 aralığında üst üste 2 gün rezervasyon yapılamaz. Boş ise bugün saat 16:00 sonrasında yeniden rezerve edilebilir.',
+        reason: `18:00 - 21:00 aralığında üst üste 2 gün rezervasyon yapılamaz. Boş ise bugün saat ${pad2(PRIME_OVERRIDE_HOUR)}:00 sonrasında yeniden rezerve edilebilir.`,
         primeTime,
-        sixteenHourOverrideUsed: false,
+        primeOverrideUsed: false,
         soloTrainingAllowed,
       };
     }
@@ -192,7 +192,7 @@ export function evaluateSlotEligibility(params: {
     bookable: true,
     reason: null,
     primeTime,
-    sixteenHourOverrideUsed,
+    primeOverrideUsed,
     soloTrainingAllowed,
   };
 }

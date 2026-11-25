@@ -1,9 +1,16 @@
 import type {
   AdminOverviewResponse,
   AuthSession,
+  PartnerBoardResponse,
+  PartnerFormat,
+  PartnerPostItem,
+  PartnerPostStatus,
+  PartnerReplyItem,
   PlayType,
+  ReservationItem,
   ResidentPortalResponse,
   ScheduleResponse,
+  WeatherResponse,
 } from '../shared/types';
 
 export interface AuthStatusResponse {
@@ -32,11 +39,12 @@ async function apiFetch<T>(
   if (options.body && !headers.has('Content-Type')) {
     headers.set('Content-Type', 'application/json');
   }
+  headers.set('X-Requested-With', 'XMLHttpRequest');
   if (token) {
     headers.set('Authorization', `Bearer ${token}`);
   }
 
-  const res = await fetch(path, { ...options, headers });
+  const res = await fetch(path, { ...options, headers, credentials: 'same-origin' });
   const text = await res.text();
   let data: unknown = {};
   try {
@@ -71,14 +79,20 @@ export const api = {
       body: JSON.stringify({ passcode }),
     }),
 
-  loginResident: (apartmentNo: string, password: string) =>
+  loginResident: (apartmentNo: string, password: string, rememberMe = false) =>
     apiFetch<{ token: string; role: 'resident'; apartmentNo: string }>(
       '/api/auth/resident/login',
       {
         method: 'POST',
-        body: JSON.stringify({ apartmentNo, password }),
+        body: JSON.stringify({ apartmentNo, password, rememberMe }),
       }
     ),
+
+  restoreSession: () =>
+    apiFetch<{ session: Omit<AuthSession, 'token'>; token?: string }>('/api/auth/me'),
+
+  logoutSession: () =>
+    apiFetch<{ ok: boolean }>('/api/auth/logout', { method: 'POST' }),
 
   verifySession: (token: string) =>
     apiFetch<{ session: Omit<AuthSession, 'token'> }>('/api/auth/me', {}, token),
@@ -87,6 +101,8 @@ export const api = {
     const query = dateStr ? `?date=${encodeURIComponent(dateStr)}` : '';
     return apiFetch<ScheduleResponse>(`/api/schedule${query}`, {}, token);
   },
+
+  getWeather: () => apiFetch<WeatherResponse>('/api/weather'),
 
   getResidentPortal: (token: string) =>
     apiFetch<ResidentPortalResponse>('/api/resident/portal', {}, token),
@@ -100,7 +116,7 @@ export const api = {
       residentConfirmed: boolean;
     }
   ) =>
-    apiFetch<{ reservation: unknown; sixteenHourOverrideUsed: boolean }>(
+    apiFetch<{ reservation: ReservationItem; primeOverrideUsed: boolean }>(
       '/api/reservations',
       {
         method: 'POST',
@@ -140,6 +156,13 @@ export const api = {
   adminDeleteApartment: (token: string, apartmentNo: string) =>
     apiFetch<{ ok: boolean }>(
       `/api/admin/apartments/${encodeURIComponent(apartmentNo)}`,
+      { method: 'DELETE' },
+      token
+    ),
+
+  adminCleanupUnassigned: (token: string) =>
+    apiFetch<{ deletedCount: number }>(
+      '/api/admin/apartments/unassigned/cleanup',
       { method: 'DELETE' },
       token
     ),
@@ -195,6 +218,61 @@ export const api = {
     apiFetch<{ ok: boolean }>(
       `/api/admin/reservations/${reservationId}/cancel`,
       { method: 'POST' },
+      token
+    ),
+
+  getPartnerBoard: (token?: string | null) =>
+    apiFetch<PartnerBoardResponse>('/api/partners', {}, token),
+
+  createPartnerPost: (
+    token: string,
+    payload: {
+      nickname: string;
+      skillLevel: number;
+      sessionFormat: PartnerFormat;
+      dateStr: string;
+      startHour: number;
+      endHour: number;
+      note?: string;
+    }
+  ) =>
+    apiFetch<{ post: PartnerPostItem }>(
+      '/api/partners',
+      {
+        method: 'POST',
+        body: JSON.stringify(payload),
+      },
+      token
+    ),
+
+  replyPartnerPost: (
+    token: string,
+    postId: number,
+    payload: { nickname: string; message: string }
+  ) =>
+    apiFetch<{ reply: PartnerReplyItem | null }>(
+      `/api/partners/${postId}/replies`,
+      {
+        method: 'POST',
+        body: JSON.stringify(payload),
+      },
+      token
+    ),
+
+  updatePartnerPostStatus: (token: string, postId: number, status: PartnerPostStatus) =>
+    apiFetch<{ ok: boolean; status: PartnerPostStatus }>(
+      `/api/partners/${postId}/status`,
+      {
+        method: 'PATCH',
+        body: JSON.stringify({ status }),
+      },
+      token
+    ),
+
+  deletePartnerPost: (token: string, postId: number) =>
+    apiFetch<{ ok: boolean }>(
+      `/api/partners/${postId}`,
+      { method: 'DELETE' },
       token
     ),
 };

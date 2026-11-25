@@ -1,14 +1,26 @@
-import { useState } from 'react';
+import { useMemo, useState } from 'react';
 import {
   AlertCircle,
   Calendar,
   CalendarCheck,
   CalendarPlus,
   Clock,
+  Cloud,
+  CloudDrizzle,
+  CloudFog,
+  CloudLightning,
+  CloudRain,
+  CloudSnow,
+  CloudSun,
+  Download,
+  Droplets,
   Flame,
   Lock,
+  MapPin,
   ShieldAlert,
+  Sun,
   UserCheck,
+  Wind,
   XCircle,
 } from 'lucide-react';
 import {
@@ -18,14 +30,23 @@ import {
   formatTurkishDateFull,
   formatTurkishDateShort,
   getTodayIstanbulDateStr,
+  pad2,
 } from '../lib/api';
 import courtVenueImg from '../assets/images/tennis_court_venue_1795610561470.jpg';
-import type { AuthSession, ScheduleResponse, ScheduleSlot } from '../shared/types';
+import { downloadIcsCalendarEvent } from '../lib/calendar';
+import type {
+  AuthSession,
+  ScheduleResponse,
+  ScheduleSlot,
+  WeatherHourlySlot,
+  WeatherResponse,
+} from '../shared/types';
 
 interface CourtScheduleViewProps {
   schedule: ScheduleResponse | null;
   loading: boolean;
   error: string | null;
+  weather: WeatherResponse | null;
   selectedDate: string;
   onSelectDate: (dateStr: string) => void;
   session: AuthSession | null;
@@ -36,10 +57,26 @@ interface CourtScheduleViewProps {
 
 const COURT_IMAGE_PATH = courtVenueImg;
 
+function WeatherGlyph({ code, className }: { code: number; className?: string }) {
+  if (code === 0) return <Sun className={className} aria-hidden="true" />;
+  if (code === 1 || code === 2) return <CloudSun className={className} aria-hidden="true" />;
+  if (code === 45 || code === 48) return <CloudFog className={className} aria-hidden="true" />;
+  if ([51, 53, 55, 56, 57].includes(code))
+    return <CloudDrizzle className={className} aria-hidden="true" />;
+  if ([61, 63, 65, 66, 67, 80, 81, 82].includes(code))
+    return <CloudRain className={className} aria-hidden="true" />;
+  if ([71, 73, 75, 77, 85, 86].includes(code))
+    return <CloudSnow className={className} aria-hidden="true" />;
+  if ([95, 96, 99].includes(code))
+    return <CloudLightning className={className} aria-hidden="true" />;
+  return <Cloud className={className} aria-hidden="true" />;
+}
+
 export function CourtScheduleView({
   schedule,
   loading,
   error,
+  weather,
   selectedDate,
   onSelectDate,
   session,
@@ -48,8 +85,11 @@ export function CourtScheduleView({
   onSelectSlotToCancel,
 }: CourtScheduleViewProps) {
   const [imgError, setImgError] = useState(false);
+  const [weatherDay, setWeatherDay] = useState<'today' | 'tomorrow'>('today');
 
   const todayStr = schedule?.todayStr || selectedDate || getTodayIstanbulDateStr();
+  const nowHour = schedule?.nowHour ?? new Date().getHours();
+
   const dateTabs = Array.from({ length: 7 }, (_, i) => {
     const dStr = addDaysToDateStr(todayStr, i);
     const { weekday, dayMonth } = formatTurkishDateShort(dStr);
@@ -60,11 +100,203 @@ export function CourtScheduleView({
     };
   });
 
+  const tomorrowStr = addDaysToDateStr(todayStr, 1);
+
+  const hourlyWeatherMap = useMemo(() => {
+    const map = new Map<string, WeatherHourlySlot>();
+    for (const h of weather?.hourly ?? []) {
+      map.set(`${h.dateStr}-${h.hour}`, h);
+    }
+    return map;
+  }, [weather]);
+
+  const todayDailyWeather = useMemo(() => {
+    return (weather?.daily ?? []).find((d) => d.dateStr === todayStr) ?? null;
+  }, [weather, todayStr]);
+
+  const tomorrowDailyWeather = useMemo(() => {
+    return (weather?.daily ?? []).find((d) => d.dateStr === tomorrowStr) ?? null;
+  }, [weather, tomorrowStr]);
+
+  const todayHourlyCourt = useMemo(() => {
+    return (weather?.hourly ?? []).filter(
+      (h) => h.dateStr === todayStr && h.hour >= 7 && h.hour <= 22
+    );
+  }, [weather, todayStr]);
+
+  const tomorrowHourlyCourt = useMemo(() => {
+    return (weather?.hourly ?? []).filter(
+      (h) => h.dateStr === tomorrowStr && h.hour >= 7 && h.hour <= 22
+    );
+  }, [weather, tomorrowStr]);
+
   const residentSummary = schedule?.residentSummary ?? null;
   const courtStatus = schedule?.courtStatus;
 
+  const activeWeatherSummary =
+    weatherDay === 'today' ? todayDailyWeather : tomorrowDailyWeather;
+  const activeHourlyCourt =
+    weatherDay === 'today' ? todayHourlyCourt : tomorrowHourlyCourt;
+
   return (
-    <div className="space-y-5 sm:space-y-7">
+    <div className="space-y-4 sm:space-y-5">
+      {/* Compact 2-Row İzmir Karşıyaka Weather Bar (Bugün / Yarın Switcher) */}
+      {weather?.available && (
+        <section
+          aria-label="İzmir Karşıyaka Hava Durumu"
+          className="bg-white border border-slate-200 rounded-2xl px-3.5 py-2.5 sm:px-4 sm:py-3 space-y-2"
+        >
+          {/* Row 1: Bugün/Yarın Toggle + Inline Daily Summary on the Same Line */}
+          <div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-2">
+            <div className="flex flex-wrap items-center gap-2.5 min-w-0">
+              <div
+                role="tablist"
+                aria-label="Hava durumu günü"
+                className="inline-flex items-center p-0.5 bg-slate-100 border border-slate-200 rounded-xl shrink-0"
+              >
+                <button
+                  type="button"
+                  role="tab"
+                  aria-selected={weatherDay === 'today'}
+                  onClick={() => setWeatherDay('today')}
+                  className={`px-2.5 py-1 text-xs font-semibold rounded-lg transition-colors cursor-pointer whitespace-nowrap ${
+                    weatherDay === 'today'
+                      ? 'bg-white text-slate-900 shadow-xs'
+                      : 'text-slate-600 hover:text-slate-900'
+                  }`}
+                >
+                  Bugün
+                </button>
+                <button
+                  type="button"
+                  role="tab"
+                  aria-selected={weatherDay === 'tomorrow'}
+                  onClick={() => setWeatherDay('tomorrow')}
+                  className={`px-2.5 py-1 text-xs font-semibold rounded-lg transition-colors cursor-pointer whitespace-nowrap ${
+                    weatherDay === 'tomorrow'
+                      ? 'bg-white text-slate-900 shadow-xs'
+                      : 'text-slate-600 hover:text-slate-900'
+                  }`}
+                >
+                  Yarın
+                </button>
+              </div>
+
+              <div className="flex items-center gap-2 min-w-0">
+                <WeatherGlyph
+                  code={
+                    weatherDay === 'today' && weather.current
+                      ? weather.current.weatherCode
+                      : activeWeatherSummary?.weatherCode ?? 0
+                  }
+                  className="w-5 h-5 text-sky-700 shrink-0"
+                />
+                <div className="flex flex-wrap items-baseline gap-x-2 gap-y-0.5 text-xs sm:text-sm">
+                  <span className="inline-flex items-center gap-1 font-semibold text-slate-600">
+                    <MapPin className="w-3.5 h-3.5 text-emerald-700 shrink-0" aria-hidden="true" />
+                    <span>{weather.locationLabel}</span>
+                  </span>
+                  <span className="font-mono text-sm sm:text-base font-bold text-slate-900 tabular-nums">
+                    {weatherDay === 'today' && weather.current
+                      ? `${weather.current.tempC}°C`
+                      : activeWeatherSummary
+                      ? `${activeWeatherSummary.tempMinC}° / ${activeWeatherSummary.tempMaxC}°C`
+                      : '—'}
+                  </span>
+                  <span className="text-xs font-semibold text-slate-700">
+                    {weatherDay === 'today' && weather.current
+                      ? weather.current.conditionLabel
+                      : activeWeatherSummary?.conditionLabel}
+                  </span>
+                </div>
+              </div>
+            </div>
+
+            <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-slate-600 font-medium tabular-nums">
+              {activeWeatherSummary && (
+                <span>
+                  <strong className="font-mono text-slate-900">
+                    {activeWeatherSummary.tempMinC}° / {activeWeatherSummary.tempMaxC}°
+                  </strong>
+                </span>
+              )}
+              <span aria-hidden="true" className="text-slate-300">
+                ·
+              </span>
+              <span className="inline-flex items-center gap-1">
+                <Wind className="w-3.5 h-3.5 text-slate-500" aria-hidden="true" />
+                <span className="font-mono font-semibold text-slate-900">
+                  {weatherDay === 'today' && weather.current
+                    ? weather.current.windKmh
+                    : activeWeatherSummary?.windMaxKmh ?? 0}{' '}
+                  km/sa
+                </span>
+              </span>
+              {activeWeatherSummary && (
+                <>
+                  <span aria-hidden="true" className="text-slate-300">
+                    ·
+                  </span>
+                  <span className="inline-flex items-center gap-1">
+                    <Droplets className="w-3.5 h-3.5 text-sky-600" aria-hidden="true" />
+                    <span className="font-mono font-semibold text-slate-900">
+                      %{activeWeatherSummary.precipProbMax}
+                    </span>
+                  </span>
+                </>
+              )}
+            </div>
+          </div>
+
+          {/* Row 2: Compact Single-Row Hourly Strip (07:00 - 23:00 for Selected Weather Day) */}
+          {activeHourlyCourt.length > 0 && (
+            <div className="flex items-stretch gap-1.5 overflow-x-auto pt-1.5 border-t border-slate-100">
+              {activeHourlyCourt.map((h) => {
+                const isCurrentHour = weatherDay === 'today' && h.hour === nowHour;
+                const isPastHour = weatherDay === 'today' && h.hour < nowHour;
+                const rainy = h.precipProb >= 35;
+                return (
+                  <div
+                    key={`${weatherDay}-${h.hour}`}
+                    className={`min-w-[56px] px-1.5 py-1 rounded-lg border text-center shrink-0 flex flex-col items-center justify-center gap-0.5 ${
+                      isCurrentHour
+                        ? 'bg-emerald-50 border-emerald-600 text-slate-900'
+                        : rainy
+                        ? 'bg-sky-50/80 border-sky-200 text-slate-900'
+                        : 'bg-slate-50 border-slate-200/80 text-slate-800'
+                    } ${isPastHour ? 'opacity-50' : ''}`}
+                  >
+                    <span
+                      className={`font-mono text-[10px] font-semibold leading-none tabular-nums ${
+                        isCurrentHour ? 'text-emerald-800 font-bold' : 'text-slate-500'
+                      }`}
+                    >
+                      {pad2(h.hour)}:00
+                    </span>
+                    <div className="flex items-center gap-1 leading-none">
+                      <WeatherGlyph
+                        code={h.weatherCode}
+                        className={`w-3.5 h-3.5 ${rainy ? 'text-sky-700' : 'text-amber-600'}`}
+                      />
+                      <span className="font-mono text-xs font-bold text-slate-900 tabular-nums">
+                        {h.tempC}°
+                      </span>
+                    </div>
+                    <span
+                      className={`font-mono text-[9px] leading-none tabular-nums ${
+                        rainy ? 'text-sky-800 font-bold' : 'text-slate-500'
+                      }`}
+                    >
+                      %{h.precipProb}
+                    </span>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </section>
+      )}
+
       {/* Top Android-Style Live Court Status + Venue Tile */}
       <section className="grid grid-cols-1 lg:grid-cols-12 gap-4 sm:gap-5 items-stretch">
         <div className="lg:col-span-7 bg-white border border-slate-200 rounded-2xl p-4 sm:p-6 flex flex-col justify-between gap-4">
@@ -74,7 +306,7 @@ export function CourtScheduleView({
                 courtStatus?.walkInAvailable
                   ? 'bg-emerald-700 text-white border-emerald-700'
                   : courtStatus?.reservedBy
-                  ? 'bg-slate-900 text-white border-slate-900'
+                  ? 'bg-rose-700 text-white border-rose-700'
                   : 'bg-slate-100 text-slate-600 border-slate-200'
               }`}
             >
@@ -174,23 +406,14 @@ export function CourtScheduleView({
               Yönetici oturumu aktif · Daire adına rezervasyon için daire girişi gerekir.
             </div>
           ) : (
-            <div className="pt-3 border-t border-slate-100 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
-              <p className="text-xs text-slate-600">
-                Saat ayırtmak için daire şifrenizle giriş yapın.
-              </p>
-              <button
-                type="button"
-                onClick={onOpenResidentLogin}
-                className="min-h-[44px] px-4 py-2.5 text-xs font-semibold text-white bg-emerald-700 hover:bg-emerald-800 rounded-xl transition-colors whitespace-nowrap shrink-0 cursor-pointer"
-              >
-                Daire Girişi Yap
-              </button>
-            </div>
+            <p className="pt-2.5 border-t border-slate-100 text-xs text-slate-500">
+              Saat ayırtmak için üstten giriş yapın veya aşağıdaki müsait bir saat kutusuna dokunun.
+            </p>
           )}
         </div>
 
-        {/* Venue Photo Card (compact on mobile, balanced on desktop) */}
-        <div className="lg:col-span-5 bg-slate-900 border border-slate-200 rounded-2xl overflow-hidden h-36 sm:h-44 lg:h-auto lg:min-h-[190px] relative">
+        {/* Venue Photo Card */}
+        <div className="lg:col-span-5 bg-slate-900 border border-slate-200 rounded-2xl overflow-hidden h-36 sm:h-44 lg:h-auto lg:min-h-[172px] relative">
           {!imgError ? (
             <img
               src={COURT_IMAGE_PATH}
@@ -208,7 +431,7 @@ export function CourtScheduleView({
           <div className="absolute inset-x-0 bottom-0 bg-gradient-to-t from-slate-950/90 via-slate-950/45 to-transparent p-3.5 sm:p-4 text-white">
             <p className="text-[11px] text-slate-200">Yoğun Saat Kuralı</p>
             <p className="font-mono text-xs sm:text-sm font-semibold mt-0.5">
-              18:00 - 21:00 · Üst üste 2 gün kapalı (16:00 sonrası boşsa açık)
+              18:00 - 21:00 · Üst üste 2 gün kapalı (15:00 sonrası boşsa açık)
             </p>
           </div>
         </div>
@@ -224,6 +447,21 @@ export function CourtScheduleView({
             <p className="text-xs text-slate-500">
               Bir saat kutusuna dokunarak rezervasyon veya iptal işlemini başlatın
             </p>
+          </div>
+
+          <div className="flex flex-wrap items-center gap-3 text-[11px] font-medium text-slate-600">
+            <span className="inline-flex items-center gap-1.5">
+              <span className="w-3 h-3 rounded bg-white border border-slate-300 inline-block" />
+              Müsait
+            </span>
+            <span className="inline-flex items-center gap-1.5">
+              <span className="w-3 h-3 rounded bg-rose-100 border border-rose-300 inline-block" />
+              Rezerveli (Dolu)
+            </span>
+            <span className="inline-flex items-center gap-1.5">
+              <span className="w-3 h-3 rounded bg-emerald-100 border border-emerald-600 inline-block" />
+              Sizin Kaydınız
+            </span>
           </div>
         </div>
 
@@ -270,7 +508,7 @@ export function CourtScheduleView({
             {Array.from({ length: 8 }).map((_, idx) => (
               <div
                 key={idx}
-                className="h-32 bg-white border border-slate-200 rounded-2xl p-4 animate-pulse flex flex-col justify-between"
+                className="h-36 bg-white border border-slate-200 rounded-2xl p-4 animate-pulse flex flex-col justify-between"
               >
                 <div className="flex items-center justify-between">
                   <div className="w-9 h-9 bg-slate-200 rounded-xl" />
@@ -302,6 +540,9 @@ export function CourtScheduleView({
                 !canBook;
 
               const isInteractive = canBook || canResidentClickGuest || canCancelOwn;
+              const slotWeather = !slot.isPast
+                ? hourlyWeatherMap.get(`${selectedDate}-${slot.hour}`)
+                : undefined;
 
               const handleTileClick = () => {
                 if (canBook) {
@@ -314,19 +555,19 @@ export function CourtScheduleView({
               };
 
               const cardClasses = isOwn
-                ? 'bg-emerald-50 border-emerald-500 text-slate-900'
+                ? 'bg-emerald-50 border-2 border-emerald-600 text-slate-900'
                 : slot.reservation
-                ? 'bg-white border-slate-200 text-slate-900'
+                ? 'bg-rose-50/90 border border-rose-200 text-slate-900'
                 : slot.isPast
                 ? 'bg-slate-100/80 border-slate-200 text-slate-400'
                 : canBook || canResidentClickGuest
                 ? 'bg-white border-slate-200 hover:border-emerald-600 active:scale-[0.98] text-slate-900'
-                : 'bg-amber-50/50 border-amber-200 text-slate-700';
+                : 'bg-amber-50/60 border-amber-200 text-slate-700';
 
               const iconBoxClasses = isOwn
                 ? 'bg-emerald-700 text-white'
                 : slot.reservation
-                ? 'bg-slate-900 text-white'
+                ? 'bg-rose-700 text-white'
                 : slot.isPast
                 ? 'bg-slate-200 text-slate-500'
                 : canBook || canResidentClickGuest
@@ -349,11 +590,13 @@ export function CourtScheduleView({
                         }
                       : undefined
                   }
-                  className={`rounded-2xl border p-3.5 sm:p-4 min-h-[132px] flex flex-col justify-between gap-3 transition-all ${cardClasses} ${
-                    isInteractive ? 'cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-700' : ''
+                  className={`rounded-2xl border p-3.5 sm:p-4 min-h-[144px] flex flex-col justify-between gap-2.5 transition-all ${cardClasses} ${
+                    isInteractive
+                      ? 'cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-700'
+                      : ''
                   }`}
                 >
-                  {/* Top Row: Boxy Status Icon + Prime/Current marker */}
+                  {/* Top Row: Boxy Status Icon + Weather / Prime / Current marker */}
                   <div className="flex items-start justify-between gap-2">
                     <div
                       className={`w-10 h-10 rounded-xl flex items-center justify-center shrink-0 ${iconBoxClasses}`}
@@ -371,14 +614,28 @@ export function CourtScheduleView({
                       )}
                     </div>
 
-                    <div className="text-right">
+                    <div className="text-right space-y-0.5">
+                      {slotWeather && (
+                        <span className="inline-flex items-center justify-end gap-1 font-mono text-[11px] font-semibold text-slate-700 tabular-nums">
+                          <WeatherGlyph
+                            code={slotWeather.weatherCode}
+                            className={`w-3.5 h-3.5 ${
+                              slotWeather.precipProb >= 35 ? 'text-sky-700' : 'text-amber-600'
+                            }`}
+                          />
+                          <span>{slotWeather.tempC}°</span>
+                          {slotWeather.precipProb >= 30 && (
+                            <span className="text-sky-800">%{slotWeather.precipProb}</span>
+                          )}
+                        </span>
+                      )}
                       {slot.isCurrent && (
                         <span className="block text-[10px] font-bold uppercase tracking-wide text-emerald-700">
                           Şu An
                         </span>
                       )}
                       {slot.primeTime && !slot.isPast && (
-                        <span className="inline-flex items-center gap-0.5 text-[10px] font-semibold text-amber-700">
+                        <span className="inline-flex items-center justify-end gap-0.5 text-[10px] font-semibold text-amber-700">
                           <Flame className="w-3 h-3" aria-hidden="true" />
                           <span>Yoğun</span>
                         </span>
@@ -386,11 +643,17 @@ export function CourtScheduleView({
                     </div>
                   </div>
 
-                  {/* Middle: Time & Status */}
+                  {/* Middle: Larger Clear Time & Status */}
                   <div className="space-y-1">
                     <p
-                      className={`font-mono text-sm sm:text-base font-bold tracking-tight ${
-                        slot.isPast ? 'text-slate-400' : 'text-slate-900'
+                      className={`font-mono text-base sm:text-lg font-bold tracking-tight tabular-nums ${
+                        slot.isPast
+                          ? 'text-slate-400'
+                          : isOwn
+                          ? 'text-emerald-950'
+                          : slot.reservation
+                          ? 'text-rose-950'
+                          : 'text-slate-900'
                       }`}
                     >
                       {formatHourRange(slot.hour)}
@@ -398,10 +661,18 @@ export function CourtScheduleView({
 
                     {slot.reservation ? (
                       <div className="space-y-0.5">
-                        <p className="text-xs font-semibold text-slate-900 truncate">
+                        <p
+                          className={`text-xs sm:text-sm font-bold truncate ${
+                            isOwn ? 'text-emerald-900' : 'text-rose-900'
+                          }`}
+                        >
                           {isOwn ? 'Sizin Kaydınız' : `Daire ${slot.reservation.apartmentNo}`}
                         </p>
-                        <p className="text-[11px] text-slate-500 truncate">
+                        <p
+                          className={`text-xs truncate ${
+                            isOwn ? 'text-emerald-800/80' : 'text-rose-800/85'
+                          }`}
+                        >
                           {slot.reservation.playType === 'solo_training'
                             ? 'Bireysel Antrenman'
                             : 'Eşli / Grup Maçı'}
@@ -411,7 +682,7 @@ export function CourtScheduleView({
                       <p className="text-xs text-slate-400">Süresi Doldu</p>
                     ) : isBlocked ? (
                       <p
-                        className="text-[11px] text-amber-900 leading-snug line-clamp-2"
+                        className="text-xs text-amber-900 leading-snug line-clamp-2"
                         title={slot.eligibility?.reason || 'Kapalı'}
                       >
                         {slot.eligibility?.reason || 'Rezervasyon kapalı'}
@@ -419,24 +690,54 @@ export function CourtScheduleView({
                     ) : (
                       <p className="text-xs font-semibold text-emerald-800">
                         Müsait
-                        {slot.eligibility?.sixteenHourOverrideUsed ? ' · 16:00 Açık' : ''}
+                        {slot.eligibility?.primeOverrideUsed ? ' · 15:00 Açık' : ''}
                       </p>
                     )}
                   </div>
 
                   {/* Bottom: Clear Tactile Action Label */}
-                  <div className="pt-1 border-t border-black/5 flex items-center justify-between text-[11px] font-semibold">
+                  <div
+                    className={`pt-1.5 border-t flex items-center justify-between gap-2 text-xs font-semibold ${
+                      slot.reservation && !isOwn
+                        ? 'border-rose-200/80'
+                        : isOwn
+                        ? 'border-emerald-200'
+                        : 'border-black/5'
+                    }`}
+                  >
                     {isOwn ? (
-                      canCancelOwn ? (
-                        <span className="inline-flex items-center gap-1 text-red-700">
-                          <XCircle className="w-3.5 h-3.5" aria-hidden="true" />
-                          <span>İptal Et</span>
-                        </span>
-                      ) : (
-                        <span className="text-emerald-800">Kullanımda</span>
-                      )
+                      <>
+                        {canCancelOwn ? (
+                          <span className="inline-flex items-center gap-1 text-red-700">
+                            <XCircle className="w-3.5 h-3.5" aria-hidden="true" />
+                            <span>İptal Et</span>
+                          </span>
+                        ) : (
+                          <span className="text-emerald-800">Kullanımda</span>
+                        )}
+                        <button
+                          type="button"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            downloadIcsCalendarEvent({
+                              id: slot.reservation!.id,
+                              dateStr: selectedDate,
+                              hour: slot.hour,
+                              startMs: slot.startMs,
+                              endMs: slot.endMs,
+                              apartmentNo: slot.reservation!.apartmentNo,
+                              playType: slot.reservation!.playType,
+                            });
+                          }}
+                          title="Ajandaya ekle (.ics)"
+                          className="inline-flex items-center gap-1 px-2 py-1 text-[11px] font-semibold text-emerald-900 bg-white border border-emerald-300 hover:bg-emerald-100 rounded-lg cursor-pointer"
+                        >
+                          <Download className="w-3 h-3" aria-hidden="true" />
+                          <span>Ajanda</span>
+                        </button>
+                      </>
                     ) : slot.reservation ? (
-                      <span className="text-slate-400">Dolu</span>
+                      <span className="text-rose-700 font-bold">Rezerveli · Dolu</span>
                     ) : slot.isPast ? (
                       <span className="text-slate-400">Geçmiş</span>
                     ) : canBook ? (

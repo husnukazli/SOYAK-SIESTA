@@ -20,8 +20,13 @@ import {
   initDatabase,
   isAdminSetupNeeded,
   isPostgres,
+  mapPartnerPostRow,
+  mapPartnerReplyRow,
   mapPenaltyRow,
   mapReservationRow,
+  parseCookies,
+  type RawPartnerPostRow,
+  type RawPartnerReplyRow,
   type RawPenaltyRow,
   type RawReservationRow,
   signSessionToken,
@@ -47,15 +52,46 @@ import {
 import type {
   AdminOverviewResponse,
   AuthSession,
+  PartnerBoardResponse,
+  PartnerFormat,
+  PartnerPostStatus,
+  PartnerReplyItem,
   PlayType,
   RealtimeEvent,
   ResidentPortalResponse,
   ScheduleResponse,
   ScheduleSlot,
+  WeatherDailyItem,
+  WeatherHourlySlot,
+  WeatherResponse,
 } from './src/shared/types.ts';
 
 interface AuthenticatedRequest extends Request {
   session?: Omit<AuthSession, 'token'>;
+}
+
+const RESIDENT_REMEMBER_COOKIE = 'soyak_resident_session';
+const REMEMBER_TTL_MS = 30 * 24 * 60 * 60 * 1000;
+const REMEMBER_MAX_AGE_SEC = 30 * 24 * 60 * 60;
+
+function buildRememberCookieHeader(value: string, maxAgeSec: number): string {
+  return `${RESIDENT_REMEMBER_COOKIE}=${encodeURIComponent(value)}; HttpOnly; Secure; SameSite=None; Partitioned; Path=/; Max-Age=${maxAgeSec}`;
+}
+
+function hasSameOriginOrAjaxHeader(req: Request): boolean {
+  if (req.headers['x-requested-with'] === 'XMLHttpRequest') {
+    return true;
+  }
+  const origin = req.headers.origin;
+  const host = (req.headers['x-forwarded-host'] || req.headers.host || '').toString().split(',')[0].trim();
+  if (origin && host) {
+    try {
+      return new URL(origin).host === host;
+    } catch {
+      return false;
+    }
+  }
+  return false;
 }
 
 function parseBearerSession(req: Request): Omit<AuthSession, 'token'> | null {
@@ -171,14 +207,54 @@ async function startServer() {
     }
   });
 
-  // Verify current Bearer session
-  app.get('/api/auth/me', (req, res) => {
-    const session = parseBearerSession(req);
-    if (!session) {
-      res.status(401).json({ error: 'Aktif oturum bulunamadı.' });
+  // Verify current Bearer session or restore remembered HttpOnly resident cookie session
+  app.get('/api/auth/me', async (req, res) => {
+    try {
+      const bearer = parseBearerSession(req);
+      if (bearer) {
+        res.json({ session: bearer });
+        return;
+      }
+
+      const cookies = parseCookies(req.headers.cookie);
+      const cookieToken = cookies[RESIDENT_REMEMBER_COOKIE];
+      if (!cookieToken) {
+        res.status(401).json({ error: 'Aktif oturum bulunamadı.' });
+        return;
+      }
+
+      const parsed = verifySessionToken(cookieToken);
+      if (!parsed || parsed.role !== 'resident' || !parsed.apartmentNo) {
+        res.setHeader('Set-Cookie', buildRememberCookieHeader('', 0));
+        res.status(401).json({ error: 'Aktif oturum bulunamadı.' });
+        return;
+      }
+
+      const row = await db.queryOne<{ apartment_no: string; password_hash: string | null }>(
+        'SELECT apartment_no, password_hash FROM apartments WHERE apartment_no = ?',
+        [parsed.apartmentNo]
+      );
+      if (!row || !row.password_hash) {
+        res.setHeader('Set-Cookie', buildRememberCookieHeader('', 0));
+        res.status(401).json({ error: 'Aktif oturum geçersiz.' });
+        return;
+      }
+
+      res.json({ session: parsed, token: cookieToken });
+    } catch (err) {
+      console.error('Auth me error:', err);
+      res.status(500).json({ error: 'Oturum doğrulanamadı.' });
+    }
+  });
+
+  // Clear Remember Me resident cookie on explicit logout
+  app.post('/api/auth/logout', (req, res) => {
+    if (!hasSameOriginOrAjaxHeader(req)) {
+      res.status(403).json({ error: 'Geçersiz istek kaynağı.' });
       return;
     }
-    res.json({ session });
+    res.setHeader('Set-Cookie', buildRememberCookieHeader('', 0));
+    res.json({ ok: true });
   });
 
   // One-time inline admin passcode setup when process.env.ADMIN_PASSCODE is unset
@@ -251,12 +327,13 @@ async function startServer() {
     }
   });
 
-  // Resident login by apartment number + assigned password
+  // Resident login by apartment number + assigned password (+ optional 30-day Remember Me cookie)
   app.post('/api/auth/resident/login', async (req, res) => {
     try {
       const apartmentNo =
         typeof req.body?.apartmentNo === 'string' ? req.body.apartmentNo.trim() : '';
       const password = typeof req.body?.password === 'string' ? req.body.password.trim() : '';
+      const rememberMe = req.body?.rememberMe === true;
 
       if (!apartmentNo || !password) {
         res.status(400).json({ error: 'Daire numarası ve şifre gereklidir.' });
@@ -286,7 +363,17 @@ async function startServer() {
         return;
       }
 
-      const token = signSessionToken({ role: 'resident', apartmentNo: row.apartment_no });
+      const token = signSessionToken(
+        { role: 'resident', apartmentNo: row.apartment_no },
+        rememberMe ? REMEMBER_TTL_MS : undefined
+      );
+
+      if (rememberMe) {
+        res.setHeader('Set-Cookie', buildRememberCookieHeader(token, REMEMBER_MAX_AGE_SEC));
+      } else {
+        res.setHeader('Set-Cookie', buildRememberCookieHeader('', 0));
+      }
+
       res.json({ token, role: 'resident', apartmentNo: row.apartment_no });
     } catch (err) {
       console.error('Resident login error:', err);
@@ -507,7 +594,7 @@ async function startServer() {
 
         return {
           reservation: mapReservationRow(row),
-          sixteenHourOverrideUsed: eligibility.sixteenHourOverrideUsed,
+          primeOverrideUsed: eligibility.primeOverrideUsed,
         };
       });
 
@@ -677,8 +764,8 @@ async function startServer() {
       const clock = getClockNow();
       const [apartments, reservationRows, penaltyRows] = await Promise.all([
         getAllApartmentSummaries(clock.nowMs, { includePasscodes: true }),
-        db.queryAll<RawReservationRow>('SELECT * FROM reservations ORDER BY start_ms DESC LIMIT 100'),
-        db.queryAll<RawPenaltyRow>('SELECT * FROM penalties ORDER BY created_at_ms DESC LIMIT 100'),
+        db.queryAll<RawReservationRow>('SELECT * FROM reservations ORDER BY start_ms DESC LIMIT 1500'),
+        db.queryAll<RawPenaltyRow>('SELECT * FROM penalties ORDER BY created_at_ms DESC LIMIT 1500'),
       ]);
 
       const payload: AdminOverviewResponse = {
@@ -750,6 +837,18 @@ async function startServer() {
     } catch (err) {
       console.error('Add apartment error:', err);
       res.status(500).json({ error: 'Daire eklenirken hata oluştu.' });
+    }
+  });
+
+  // Bulk-delete unassigned apartments (those without a password) so admin keeps only invited residents
+  app.delete('/api/admin/apartments/unassigned/cleanup', requireAuth('admin'), async (_req, res) => {
+    try {
+      const info = await db.execute('DELETE FROM apartments WHERE password_hash IS NULL');
+      broadcastEvent({ type: 'directory:changed' });
+      res.json({ deletedCount: info.changes });
+    } catch (err) {
+      console.error('Cleanup unassigned apartments error:', err);
+      res.status(500).json({ error: 'Şifresiz daireler temizlenirken hata oluştu.' });
     }
   });
 
@@ -987,6 +1086,386 @@ async function startServer() {
     } catch (err) {
       console.error('Admin cancel error:', err);
       res.status(500).json({ error: 'Rezervasyon iptal edilirken hata oluştu.' });
+    }
+  });
+
+  // --- PARTNER FINDER ROUTES (Oyun Arkadaşı Arayanlar - apartment_no is NEVER exposed) ---
+
+  app.get('/api/partners', async (req, res) => {
+    try {
+      const clock = getClockNow();
+      const session = parseBearerSession(req);
+      const viewerAptNo = session?.role === 'resident' ? session.apartmentNo ?? null : null;
+      const minDate = shiftDateStr(clock.dateStr, -1);
+
+      const postRows = await db.queryAll<RawPartnerPostRow>(
+        'SELECT * FROM partner_posts WHERE date_str >= ? ORDER BY created_at_ms DESC LIMIT 120',
+        [minDate]
+      );
+
+      const replyRows =
+        postRows.length > 0
+          ? await db.queryAll<RawPartnerReplyRow>(
+              `SELECT * FROM partner_replies WHERE post_id IN (${postRows.map(() => '?').join(',')}) ORDER BY created_at_ms ASC`,
+              postRows.map((p) => Number(p.id))
+            )
+          : [];
+
+      const repliesByPost = new Map<number, PartnerReplyItem[]>();
+      for (const r of replyRows) {
+        const mapped = mapPartnerReplyRow(r, viewerAptNo);
+        const list = repliesByPost.get(mapped.postId) ?? [];
+        list.push(mapped);
+        repliesByPost.set(mapped.postId, list);
+      }
+
+      const payload: PartnerBoardResponse = {
+        posts: postRows.map((p) =>
+          mapPartnerPostRow(p, viewerAptNo, repliesByPost.get(Number(p.id)) ?? [])
+        ),
+        todayStr: clock.dateStr,
+        nowMs: clock.nowMs,
+      };
+      res.json(payload);
+    } catch (err) {
+      console.error('Partner board fetch error:', err);
+      res.status(500).json({ error: 'Oyun arkadaşı ilanları yüklenemedi.' });
+    }
+  });
+
+  app.post('/api/partners', requireAuth('resident'), async (req: AuthenticatedRequest, res) => {
+    try {
+      const apartmentNo = req.session!.apartmentNo!;
+      const nickname = typeof req.body?.nickname === 'string' ? req.body.nickname.trim() : '';
+      const skillLevel = Number(req.body?.skillLevel);
+      const formatRaw = req.body?.sessionFormat;
+      const sessionFormat: PartnerFormat | null =
+        formatRaw === 'match' || formatRaw === 'training' || formatRaw === 'rally'
+          ? formatRaw
+          : null;
+      const dateStr = typeof req.body?.dateStr === 'string' ? req.body.dateStr.trim() : '';
+      const startHour = Number(req.body?.startHour);
+      const endHour = Number(req.body?.endHour);
+      const noteRaw = typeof req.body?.note === 'string' ? req.body.note.trim() : '';
+
+      if (nickname.length < 2 || nickname.length > 24) {
+        res.status(400).json({ error: 'Takma ad (nickname) 2 ile 24 karakter arasında olmalıdır.' });
+        return;
+      }
+      if (!Number.isInteger(skillLevel) || skillLevel < 1 || skillLevel > 7) {
+        res.status(400).json({ error: 'Oyun seviyesi 1 ile 7 arasında seçilmelidir.' });
+        return;
+      }
+      if (!sessionFormat) {
+        res.status(400).json({ error: 'Oyun türü (Maç, Antrenman veya Ralli) seçilmelidir.' });
+        return;
+      }
+      const clock = getClockNow();
+      if (!isValidDateStr(dateStr) || dateStr < clock.dateStr) {
+        res.status(400).json({ error: 'Geçerli ve bugünden eski olmayan bir tarih seçin.' });
+        return;
+      }
+      if (
+        !Number.isInteger(startHour) ||
+        !Number.isInteger(endHour) ||
+        startHour < COURT_OPEN_HOUR ||
+        endHour > COURT_CLOSE_HOUR ||
+        endHour <= startHour
+      ) {
+        res.status(400).json({ error: 'Geçerli bir saat aralığı seçin (07:00 - 23:00).' });
+        return;
+      }
+      if (noteRaw.length > 240) {
+        res.status(400).json({ error: 'Açıklama notu en fazla 240 karakter olabilir.' });
+        return;
+      }
+
+      const createdAtMs = Date.now();
+      const insertedId = await db.insertReturningId(
+        `INSERT INTO partner_posts
+         (apartment_no, nickname, skill_level, session_format, date_str, start_hour, end_hour, note, status, created_at_ms)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'open', ?)`,
+        [
+          apartmentNo,
+          nickname,
+          skillLevel,
+          sessionFormat,
+          dateStr,
+          startHour,
+          endHour,
+          noteRaw || null,
+          createdAtMs,
+        ]
+      );
+
+      const row = await db.queryOne<RawPartnerPostRow>(
+        'SELECT * FROM partner_posts WHERE id = ?',
+        [insertedId]
+      );
+      if (!row) {
+        res.status(500).json({ error: 'İlan oluşturuldu ancak okunamadı.' });
+        return;
+      }
+
+      broadcastEvent({ type: 'partner:changed' });
+      res.status(201).json({ post: mapPartnerPostRow(row, apartmentNo, []) });
+    } catch (err) {
+      console.error('Create partner post error:', err);
+      res.status(500).json({ error: 'Oyun arkadaşı ilanı oluşturulurken hata oluştu.' });
+    }
+  });
+
+  app.post('/api/partners/:id/replies', requireAuth('resident'), async (req: AuthenticatedRequest, res) => {
+    try {
+      const apartmentNo = req.session!.apartmentNo!;
+      const postId = Number(req.params.id);
+      if (!Number.isInteger(postId) || postId <= 0) {
+        res.status(400).json({ error: 'Geçersiz ilan numarası.' });
+        return;
+      }
+
+      const nickname = typeof req.body?.nickname === 'string' ? req.body.nickname.trim() : '';
+      const message = typeof req.body?.message === 'string' ? req.body.message.trim() : '';
+
+      if (nickname.length < 2 || nickname.length > 24) {
+        res.status(400).json({ error: 'Takma ad (nickname) 2 ile 24 karakter arasında olmalıdır.' });
+        return;
+      }
+      if (message.length < 1 || message.length > 300) {
+        res.status(400).json({ error: 'Cevap mesajı 1 ile 300 karakter arasında olmalıdır.' });
+        return;
+      }
+
+      const post = await db.queryOne<{ id: number | string; status: PartnerPostStatus }>(
+        'SELECT id, status FROM partner_posts WHERE id = ?',
+        [postId]
+      );
+      if (!post) {
+        res.status(404).json({ error: 'İlan bulunamadı.' });
+        return;
+      }
+      if (post.status === 'closed') {
+        res.status(400).json({ error: 'Bu ilan kapatılmış olduğu için cevap yazılamaz.' });
+        return;
+      }
+
+      const createdAtMs = Date.now();
+      const replyId = await db.insertReturningId(
+        'INSERT INTO partner_replies (post_id, apartment_no, nickname, message, created_at_ms) VALUES (?, ?, ?, ?, ?)',
+        [postId, apartmentNo, nickname, message, createdAtMs]
+      );
+      const replyRow = await db.queryOne<RawPartnerReplyRow>(
+        'SELECT * FROM partner_replies WHERE id = ?',
+        [replyId]
+      );
+
+      broadcastEvent({ type: 'partner:changed' });
+      res.status(201).json({
+        reply: replyRow ? mapPartnerReplyRow(replyRow, apartmentNo) : null,
+      });
+    } catch (err) {
+      console.error('Create partner reply error:', err);
+      res.status(500).json({ error: 'Cevap gönderilirken hata oluştu.' });
+    }
+  });
+
+  app.patch('/api/partners/:id/status', requireAuth('resident'), async (req: AuthenticatedRequest, res) => {
+    try {
+      const apartmentNo = req.session!.apartmentNo!;
+      const postId = Number(req.params.id);
+      const nextStatus = req.body?.status;
+      if (!Number.isInteger(postId) || postId <= 0) {
+        res.status(400).json({ error: 'Geçersiz ilan numarası.' });
+        return;
+      }
+      if (nextStatus !== 'open' && nextStatus !== 'matched' && nextStatus !== 'closed') {
+        res.status(400).json({ error: 'Geçersiz ilan durumu.' });
+        return;
+      }
+
+      const post = await db.queryOne<{ apartment_no: string }>(
+        'SELECT apartment_no FROM partner_posts WHERE id = ?',
+        [postId]
+      );
+      if (!post) {
+        res.status(404).json({ error: 'İlan bulunamadı.' });
+        return;
+      }
+      if (post.apartment_no !== apartmentNo) {
+        res.status(403).json({ error: 'Yalnızca kendi ilanınızın durumunu güncelleyebilirsiniz.' });
+        return;
+      }
+
+      await db.execute('UPDATE partner_posts SET status = ? WHERE id = ?', [nextStatus, postId]);
+      broadcastEvent({ type: 'partner:changed' });
+      res.json({ ok: true, status: nextStatus });
+    } catch (err) {
+      console.error('Update partner post status error:', err);
+      res.status(500).json({ error: 'İlan durumu güncellenemedi.' });
+    }
+  });
+
+  app.delete('/api/partners/:id', requireAuth(), async (req: AuthenticatedRequest, res) => {
+    try {
+      const postId = Number(req.params.id);
+      if (!Number.isInteger(postId) || postId <= 0) {
+        res.status(400).json({ error: 'Geçersiz ilan numarası.' });
+        return;
+      }
+      const post = await db.queryOne<{ apartment_no: string }>(
+        'SELECT apartment_no FROM partner_posts WHERE id = ?',
+        [postId]
+      );
+      if (!post) {
+        res.status(404).json({ error: 'İlan bulunamadı.' });
+        return;
+      }
+      const isAdmin = req.session!.role === 'admin';
+      const isOwner =
+        req.session!.role === 'resident' && req.session!.apartmentNo === post.apartment_no;
+      if (!isAdmin && !isOwner) {
+        res.status(403).json({ error: 'Bu ilanı silme yetkiniz bulunmamaktadır.' });
+        return;
+      }
+
+      await db.execute('DELETE FROM partner_posts WHERE id = ?', [postId]);
+      broadcastEvent({ type: 'partner:changed' });
+      res.json({ ok: true });
+    } catch (err) {
+      console.error('Delete partner post error:', err);
+      res.status(500).json({ error: 'İlan silinirken hata oluştu.' });
+    }
+  });
+
+  // İzmir · Karşıyaka weather forecast (15-min cached proxy via Open-Meteo, keyless & free)
+  const KARSIYAKA_WEATHER_URL =
+    'https://api.open-meteo.com/v1/forecast?latitude=38.4556&longitude=27.1103&current=temperature_2m,weather_code,wind_speed_10m&hourly=temperature_2m,precipitation_probability,weather_code,wind_speed_10m&daily=weather_code,temperature_2m_max,temperature_2m_min,precipitation_probability_max,wind_speed_10m_max&timezone=Europe%2FIstanbul&forecast_days=8';
+  const WEATHER_CACHE_TTL_MS = 15 * 60 * 1000;
+  let weatherCache: { expiresAtMs: number; data: WeatherResponse } | null = null;
+
+  function describeWmoCode(code: number): string {
+    if (code === 0) return 'Açık';
+    if (code === 1) return 'Az Bulutlu';
+    if (code === 2) return 'Parçalı Bulutlu';
+    if (code === 3) return 'Bulutlu';
+    if (code === 45 || code === 48) return 'Sisli';
+    if ([51, 53, 55, 56, 57].includes(code)) return 'Çisenti';
+    if ([61, 63, 65, 66, 67].includes(code)) return 'Yağmurlu';
+    if ([71, 73, 75, 77, 85, 86].includes(code)) return 'Karlı';
+    if ([80, 81, 82].includes(code)) return 'Sağanak';
+    if ([95, 96, 99].includes(code)) return 'Fırtınalı';
+    return 'Bulutlu';
+  }
+
+  app.get('/api/weather', async (_req, res) => {
+    const now = Date.now();
+    if (weatherCache && weatherCache.expiresAtMs > now) {
+      res.json(weatherCache.data);
+      return;
+    }
+
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 5000);
+    try {
+      const upstream = await fetch(KARSIYAKA_WEATHER_URL, { signal: controller.signal });
+      if (!upstream.ok) {
+        throw new Error(`Weather upstream HTTP ${upstream.status}`);
+      }
+      const raw = (await upstream.json()) as {
+        current?: {
+          temperature_2m?: number;
+          weather_code?: number;
+          wind_speed_10m?: number;
+        };
+        hourly?: {
+          time?: string[];
+          temperature_2m?: number[];
+          precipitation_probability?: number[];
+          weather_code?: number[];
+          wind_speed_10m?: number[];
+        };
+        daily?: {
+          time?: string[];
+          weather_code?: number[];
+          temperature_2m_max?: number[];
+          temperature_2m_min?: number[];
+          precipitation_probability_max?: number[];
+          wind_speed_10m_max?: number[];
+        };
+      };
+
+      const hourly: WeatherHourlySlot[] = [];
+      const hTimes = raw.hourly?.time ?? [];
+      for (let i = 0; i < hTimes.length; i++) {
+        const t = hTimes[i];
+        if (typeof t !== 'string' || t.length < 13) continue;
+        const dateStr = t.slice(0, 10);
+        const hour = Number(t.slice(11, 13));
+        if (!Number.isInteger(hour)) continue;
+        const weatherCode = Number(raw.hourly?.weather_code?.[i] ?? 0);
+        hourly.push({
+          dateStr,
+          hour,
+          tempC: Math.round(Number(raw.hourly?.temperature_2m?.[i] ?? 0)),
+          weatherCode,
+          conditionLabel: describeWmoCode(weatherCode),
+          precipProb: Math.round(Number(raw.hourly?.precipitation_probability?.[i] ?? 0)),
+          windKmh: Math.round(Number(raw.hourly?.wind_speed_10m?.[i] ?? 0)),
+        });
+      }
+
+      const daily: WeatherDailyItem[] = [];
+      const dTimes = raw.daily?.time ?? [];
+      for (let i = 0; i < dTimes.length; i++) {
+        const dateStr = dTimes[i];
+        if (typeof dateStr !== 'string') continue;
+        const weatherCode = Number(raw.daily?.weather_code?.[i] ?? 0);
+        daily.push({
+          dateStr,
+          weatherCode,
+          conditionLabel: describeWmoCode(weatherCode),
+          tempMinC: Math.round(Number(raw.daily?.temperature_2m_min?.[i] ?? 0)),
+          tempMaxC: Math.round(Number(raw.daily?.temperature_2m_max?.[i] ?? 0)),
+          precipProbMax: Math.round(Number(raw.daily?.precipitation_probability_max?.[i] ?? 0)),
+          windMaxKmh: Math.round(Number(raw.daily?.wind_speed_10m_max?.[i] ?? 0)),
+        });
+      }
+
+      const currentCode = Number(raw.current?.weather_code ?? 0);
+      const payload: WeatherResponse = {
+        available: true,
+        locationLabel: 'İzmir · Karşıyaka',
+        fetchedAtMs: now,
+        current: raw.current
+          ? {
+              tempC: Math.round(Number(raw.current.temperature_2m ?? 0)),
+              weatherCode: currentCode,
+              conditionLabel: describeWmoCode(currentCode),
+              windKmh: Math.round(Number(raw.current.wind_speed_10m ?? 0)),
+            }
+          : null,
+        daily,
+        hourly,
+      };
+
+      weatherCache = { expiresAtMs: now + WEATHER_CACHE_TTL_MS, data: payload };
+      res.json(payload);
+    } catch (err) {
+      console.error('Weather fetch error:', err);
+      if (weatherCache) {
+        res.json(weatherCache.data);
+        return;
+      }
+      res.json({
+        available: false,
+        locationLabel: 'İzmir · Karşıyaka',
+        fetchedAtMs: now,
+        current: null,
+        daily: [],
+        hourly: [],
+      } satisfies WeatherResponse);
+    } finally {
+      clearTimeout(timeout);
     }
   });
 

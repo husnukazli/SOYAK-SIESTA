@@ -16,6 +16,7 @@ import {
   formatTurkishDateFull,
 } from '../lib/api';
 import type { AuthSession, ResidentPortalResponse, ReservationItem } from '../shared/types';
+import { CalendarActions } from './CalendarActions';
 
 interface ResidentPortalViewProps {
   session: AuthSession | null;
@@ -247,45 +248,52 @@ export function ResidentPortalView({
       </div>
 
       {/* Active Reservation Card */}
-      <section className="bg-white border border-slate-200 rounded-2xl p-4 sm:p-6 space-y-3.5">
+      <section className="bg-white border border-slate-200 rounded-2xl p-4 sm:p-6 space-y-4">
         <h2 className="font-display text-base font-bold text-slate-900">
           Mevcut Aktif Rezervasyonunuz
         </h2>
         {activeRes ? (
-          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 pt-3 border-t border-slate-100">
-            <div className="space-y-1">
-              <p className="text-sm font-bold text-slate-900">
-                {formatTurkishDateFull(activeRes.dateStr)}
-              </p>
-              <div className="flex flex-wrap items-center gap-2 text-xs text-slate-600">
-                <span className="font-mono font-bold text-emerald-800">
-                  {formatHourRange(activeRes.hour)}
-                </span>
-                <span aria-hidden="true">·</span>
-                <span>
-                  {activeRes.playType === 'solo_training'
-                    ? 'Bireysel Antrenman'
-                    : 'Eşli / Grup Maçı'}
-                </span>
-                <span aria-hidden="true">·</span>
-                <span className={isLateWindow ? 'text-amber-700 font-semibold' : 'text-slate-500'}>
-                  {canCancelActive
-                    ? isLateWindow
-                      ? `Başlangıca ${formatRemainingDuration(activeRes.startMs - nowMs)} (Geç İptal)`
-                      : `Ücretsiz iptale ${formatRemainingDuration(activeRes.startMs - nowMs - 4 * 3600000)}`
-                    : 'Kullanım saati devam ediyor'}
-                </span>
+          <div className="space-y-4 pt-3 border-t border-slate-100">
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+              <div className="space-y-1">
+                <p className="text-sm font-bold text-slate-900">
+                  {formatTurkishDateFull(activeRes.dateStr)}
+                </p>
+                <div className="flex flex-wrap items-center gap-2 text-xs text-slate-600">
+                  <span className="font-mono text-sm font-bold text-emerald-800">
+                    {formatHourRange(activeRes.hour)}
+                  </span>
+                  <span aria-hidden="true">·</span>
+                  <span>
+                    {activeRes.playType === 'solo_training'
+                      ? 'Bireysel Antrenman'
+                      : 'Eşli / Grup Maçı'}
+                  </span>
+                  <span aria-hidden="true">·</span>
+                  <span className={isLateWindow ? 'text-amber-700 font-semibold' : 'text-slate-500'}>
+                    {canCancelActive
+                      ? isLateWindow
+                        ? `Başlangıca ${formatRemainingDuration(activeRes.startMs - nowMs)} (Geç İptal)`
+                        : `Ücretsiz iptale ${formatRemainingDuration(activeRes.startMs - nowMs - 4 * 3600000)}`
+                      : 'Kullanım saati devam ediyor'}
+                  </span>
+                </div>
               </div>
+              {canCancelActive && (
+                <button
+                  type="button"
+                  onClick={() => onRequestCancel(activeRes)}
+                  className="min-h-[44px] px-4 py-2 text-xs font-semibold text-red-700 bg-red-50 hover:bg-red-100 border border-red-200 rounded-xl transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+                >
+                  Rezervasyonu İptal Et
+                </button>
+              )}
             </div>
-            {canCancelActive && (
-              <button
-                type="button"
-                onClick={() => onRequestCancel(activeRes)}
-                className="min-h-[44px] px-4 py-2 text-xs font-semibold text-red-700 bg-red-50 hover:bg-red-100 border border-red-200 rounded-xl transition-colors whitespace-nowrap shrink-0 cursor-pointer"
-              >
-                Rezervasyonu İptal Et
-              </button>
-            )}
+
+            <div className="pt-3 border-t border-slate-100 space-y-2">
+              <p className="text-xs font-bold text-slate-800">Ajandama Ekle</p>
+              <CalendarActions reservation={activeRes} compact />
+            </div>
           </div>
         ) : (
           <div className="pt-3 border-t border-slate-100 flex flex-col sm:flex-row sm:items-center justify-between gap-3 text-xs sm:text-sm text-slate-500">
