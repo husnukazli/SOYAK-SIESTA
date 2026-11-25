@@ -1,5 +1,5 @@
-import { useState } from 'react';
-import { KeyRound, X } from 'lucide-react';
+import { useEffect, useState } from 'react';
+import { KeyRound, ShieldCheck, X } from 'lucide-react';
 import { api, ApiError, type AuthStatusResponse } from '../lib/api';
 import type { AuthSession } from '../shared/types';
 
@@ -11,6 +11,8 @@ interface AuthModalProps {
   onGoToAdmin: () => void;
 }
 
+const LOGO_URL = '/assets/aistudio/image_457df46a.png';
+
 export function AuthModal({
   open,
   onClose,
@@ -18,23 +20,34 @@ export function AuthModal({
   onAuthenticated,
   onGoToAdmin,
 }: AuthModalProps) {
-  const [apartmentNo, setApartmentNo] = useState<string>('1');
+  const [apartmentNo, setApartmentNo] = useState<string>('');
   const [password, setPassword] = useState<string>('');
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
+  const apartments = authStatus?.apartments ?? [];
+
+  useEffect(() => {
+    if (apartments.length > 0 && !apartments.some((a) => a.apartmentNo === apartmentNo)) {
+      setApartmentNo(apartments[0].apartmentNo);
+    }
+  }, [apartments, apartmentNo]);
+
   if (!open) return null;
 
-  const apartments = authStatus?.apartments ?? [];
   const selectedApt = apartments.find((a) => a.apartmentNo === apartmentNo);
   const anyPasswordsAssigned = apartments.some((a) => a.hasPassword);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setError(null);
+    if (!apartmentNo.trim()) {
+      setError('Lütfen daire numaranızı seçin veya girin.');
+      return;
+    }
     setLoading(true);
     try {
-      const res = await api.loginResident(apartmentNo, password);
+      const res = await api.loginResident(apartmentNo.trim(), password);
       onAuthenticated({
         role: 'resident',
         apartmentNo: res.apartmentNo,
@@ -55,39 +68,45 @@ export function AuthModal({
 
   return (
     <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/50 backdrop-blur-xs p-4"
+      className="fixed inset-0 z-50 flex items-end sm:items-center justify-center bg-slate-900/50 backdrop-blur-xs p-0 sm:p-4"
       role="dialog"
       aria-modal="true"
       aria-labelledby="resident-login-title"
     >
-      <div className="w-full max-w-md bg-white border border-slate-200 rounded-xl shadow-xl overflow-hidden">
-        <div className="flex items-center justify-between px-6 py-4 border-b border-slate-200">
-          <div className="flex items-center gap-2.5">
-            <KeyRound className="w-4 h-4 text-emerald-700" aria-hidden="true" />
-            <h2 id="resident-login-title" className="font-display text-base font-semibold text-slate-900">
-              Daire Sakini Girişi
-            </h2>
+      <div className="w-full sm:max-w-md bg-white border border-slate-200 rounded-t-3xl sm:rounded-2xl shadow-xl overflow-hidden max-h-[92vh] overflow-y-auto">
+        <div className="w-10 h-1.5 bg-slate-300 rounded-full mx-auto mt-3 mb-1 sm:hidden" />
+
+        <div className="flex items-center justify-between px-5 sm:px-6 py-4 border-b border-slate-200">
+          <div className="flex items-center gap-3">
+            <div className="h-9 px-2 bg-white border border-slate-200 rounded-xl flex items-center justify-center shrink-0">
+              <img src={LOGO_URL} alt="Soyak Siesta" className="h-5 w-auto object-contain" />
+            </div>
+            <div>
+              <h2 id="resident-login-title" className="font-display text-sm sm:text-base font-bold text-slate-900">
+                Daire Sakini Girişi
+              </h2>
+              <p className="text-[11px] text-slate-500">Şifreli Rezervasyon Oturumu</p>
+            </div>
           </div>
           <button
             type="button"
             onClick={onClose}
             aria-label="Pencereyi kapat"
-            className="p-1.5 text-slate-500 hover:text-slate-900 rounded-md hover:bg-slate-100 cursor-pointer"
+            className="min-w-[44px] min-h-[44px] flex items-center justify-center text-slate-500 hover:text-slate-900 rounded-xl hover:bg-slate-100 cursor-pointer"
           >
-            <X className="w-4 h-4" />
+            <X className="w-5 h-5" />
           </button>
         </div>
 
-        <form onSubmit={handleSubmit} className="p-6 space-y-5">
-          <p className="text-sm text-slate-600 leading-relaxed">
-            Kort rezervasyonu ve iptal işlemleri, daire numaranıza site yönetimi tarafından tahsis edilen şifre ile yapılır.
-          </p>
-
-          {!anyPasswordsAssigned && (
-            <div className="p-3.5 bg-amber-50 border border-amber-200 rounded-lg text-xs text-amber-900 space-y-2">
-              <p className="font-medium">Henüz hiçbir daireye şifre tahsis edilmemiş.</p>
-              <p>
-                Site yöneticisi iseniz Yönetim sekmesinden daire şifrelerini tanımlayabilirsiniz.
+        <form onSubmit={handleSubmit} className="p-5 sm:p-6 space-y-4">
+          {apartments.length === 0 ? (
+            <div className="p-4 bg-amber-50 border border-amber-200 rounded-2xl text-xs text-amber-900 space-y-2.5">
+              <div className="flex items-center gap-2 font-semibold">
+                <ShieldCheck className="w-4 h-4 text-amber-700 shrink-0" aria-hidden="true" />
+                <span>Henüz kayıtlı daire eklenmemiş</span>
+              </div>
+              <p className="leading-relaxed">
+                Site yönetimi henüz daire numaralarını ve şifrelerini tanımlamamış. Yönetici iseniz Yönetim sekmesinden daireleri ekleyebilirsiniz.
               </p>
               <button
                 type="button"
@@ -95,16 +114,32 @@ export function AuthModal({
                   onClose();
                   onGoToAdmin();
                 }}
-                className="font-semibold text-amber-950 underline hover:no-underline cursor-pointer"
+                className="min-h-[40px] px-3.5 py-2 bg-amber-900 text-white font-semibold rounded-xl cursor-pointer"
               >
-                Yönetim Panelini Aç
+                Yönetim Paneline Geç
               </button>
             </div>
+          ) : (
+            !anyPasswordsAssigned && (
+              <div className="p-3.5 bg-amber-50 border border-amber-200 rounded-2xl text-xs text-amber-900 space-y-2">
+                <p className="font-medium">Henüz hiçbir daireye şifre tahsis edilmemiş.</p>
+                <button
+                  type="button"
+                  onClick={() => {
+                    onClose();
+                    onGoToAdmin();
+                  }}
+                  className="font-semibold text-amber-950 underline hover:no-underline cursor-pointer"
+                >
+                  Yönetim Panelini Aç
+                </button>
+              </div>
+            )
           )}
 
           <div className="space-y-1.5">
-            <label htmlFor="apt-select" className="block text-xs font-medium text-slate-700">
-              Daire Numarası
+            <label htmlFor="apt-select" className="block text-xs font-semibold text-slate-700">
+              Blok / Daire Numarası
             </label>
             {apartments.length > 0 ? (
               <select
@@ -114,7 +149,7 @@ export function AuthModal({
                   setApartmentNo(e.target.value);
                   setError(null);
                 }}
-                className="w-full h-11 px-3 bg-white border border-slate-300 rounded-lg text-sm text-slate-900 font-mono focus:outline-none focus:ring-2 focus:ring-emerald-700 focus:border-emerald-700"
+                className="w-full h-12 px-3.5 bg-white border border-slate-300 rounded-xl text-sm text-slate-900 font-mono focus:outline-none focus:ring-2 focus:ring-emerald-700 focus:border-emerald-700"
               >
                 {apartments.map((apt) => (
                   <option key={apt.apartmentNo} value={apt.apartmentNo}>
@@ -128,27 +163,33 @@ export function AuthModal({
                 type="text"
                 value={apartmentNo}
                 onChange={(e) => setApartmentNo(e.target.value)}
-                placeholder="Örn: 12"
-                className="w-full h-11 px-3 bg-white border border-slate-300 rounded-lg text-sm text-slate-900 font-mono focus:outline-none focus:ring-2 focus:ring-emerald-700"
+                placeholder="Örn: B1-12 veya K2/4"
+                className="w-full h-12 px-3.5 bg-white border border-slate-300 rounded-xl text-sm text-slate-900 font-mono focus:outline-none focus:ring-2 focus:ring-emerald-700"
                 required
               />
             )}
           </div>
 
           <div className="space-y-1.5">
-            <label htmlFor="apt-password" className="block text-xs font-medium text-slate-700">
+            <label htmlFor="apt-password" className="block text-xs font-semibold text-slate-700">
               Daire Şifresi
             </label>
-            <input
-              id="apt-password"
-              type="password"
-              value={password}
-              onChange={(e) => setPassword(e.target.value)}
-              placeholder="Tahsis edilen şifreyi girin"
-              autoComplete="current-password"
-              className="w-full h-11 px-3 bg-white border border-slate-300 rounded-lg text-sm text-slate-900 font-mono focus:outline-none focus:ring-2 focus:ring-emerald-700 focus:border-emerald-700"
-              required
-            />
+            <div className="relative">
+              <KeyRound
+                className="w-4 h-4 text-slate-400 absolute left-3.5 top-1/2 -translate-y-1/2"
+                aria-hidden="true"
+              />
+              <input
+                id="apt-password"
+                type="password"
+                value={password}
+                onChange={(e) => setPassword(e.target.value)}
+                placeholder="Tahsis edilen şifreyi girin"
+                autoComplete="current-password"
+                className="w-full h-12 pl-10 pr-3.5 bg-white border border-slate-300 rounded-xl text-sm text-slate-900 font-mono focus:outline-none focus:ring-2 focus:ring-emerald-700 focus:border-emerald-700"
+                required
+              />
+            </div>
             {selectedApt && !selectedApt.hasPassword && (
               <p className="text-xs text-amber-700">
                 Seçili daireye henüz şifre atanmamıştır.
@@ -157,23 +198,23 @@ export function AuthModal({
           </div>
 
           {error && (
-            <div role="alert" className="p-3 bg-red-50 border border-red-200 rounded-lg text-xs text-red-800">
+            <div role="alert" className="p-3 bg-red-50 border border-red-200 rounded-xl text-xs text-red-800">
               {error}
             </div>
           )}
 
-          <div className="flex items-center justify-end gap-3 pt-2">
+          <div className="grid grid-cols-2 gap-2.5 pt-2">
             <button
               type="button"
               onClick={onClose}
-              className="px-4 py-2.5 text-xs font-medium text-slate-700 hover:text-slate-900 bg-slate-100 hover:bg-slate-200 rounded-lg transition-colors whitespace-nowrap cursor-pointer"
+              className="min-h-[48px] px-4 py-2.5 text-xs font-semibold text-slate-700 bg-slate-100 hover:bg-slate-200 rounded-xl transition-colors whitespace-nowrap cursor-pointer"
             >
               Vazgeç
             </button>
             <button
               type="submit"
-              disabled={loading || !password.trim()}
-              className="px-5 py-2.5 text-xs font-semibold text-white bg-emerald-700 hover:bg-emerald-800 disabled:opacity-50 rounded-lg transition-colors whitespace-nowrap cursor-pointer"
+              disabled={loading || !password.trim() || !apartmentNo.trim()}
+              className="min-h-[48px] px-5 py-2.5 text-xs font-semibold text-white bg-emerald-700 hover:bg-emerald-800 disabled:opacity-50 rounded-xl transition-colors whitespace-nowrap cursor-pointer"
             >
               {loading ? 'Doğrulanıyor...' : 'Giriş Yap'}
             </button>

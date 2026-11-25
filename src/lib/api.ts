@@ -137,6 +137,13 @@ export const api = {
       token
     ),
 
+  adminDeleteApartment: (token: string, apartmentNo: string) =>
+    apiFetch<{ ok: boolean }>(
+      `/api/admin/apartments/${encodeURIComponent(apartmentNo)}`,
+      { method: 'DELETE' },
+      token
+    ),
+
   adminSetApartmentPassword: (token: string, apartmentNo: string, password?: string) =>
     apiFetch<{ apartmentNo: string; issuedPasscode: string }>(
       `/api/admin/apartments/${encodeURIComponent(apartmentNo)}/password`,

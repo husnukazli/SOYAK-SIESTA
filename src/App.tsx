@@ -130,6 +130,14 @@ export default function App() {
     onReconnectSync: handleReconnectSync,
   });
 
+  const handleSelectTab = (tab: ActiveTab) => {
+    if (tab === 'admin' && session?.role === 'resident') {
+      setActiveTab('schedule');
+      return;
+    }
+    setActiveTab(tab);
+  };
+
   const handleSelectDate = (dateStr: string) => {
     setSelectedDate(dateStr);
     loadSchedule(dateStr);
@@ -137,6 +145,9 @@ export default function App() {
 
   const handleAuthenticated = (newSession: AuthSession) => {
     setSession(newSession);
+    if (newSession.role === 'resident' && activeTab === 'admin') {
+      setActiveTab('schedule');
+    }
     setToast({
       message:
         newSession.role === 'admin'
@@ -184,11 +195,14 @@ export default function App() {
       ? liveMatchingSlot.reservation.apartmentNo
       : null;
 
+  const effectiveTab: ActiveTab =
+    session?.role === 'resident' && activeTab === 'admin' ? 'schedule' : activeTab;
+
   return (
-    <div className="min-h-screen flex flex-col bg-slate-50 text-slate-900">
+    <div className="min-h-screen flex flex-col bg-slate-100/70 text-slate-900">
       <Header
-        activeTab={activeTab}
-        onSelectTab={setActiveTab}
+        activeTab={effectiveTab}
+        onSelectTab={handleSelectTab}
         session={session}
         onOpenResidentLogin={() => {
           loadAuthStatus();
@@ -197,32 +211,38 @@ export default function App() {
         onLogout={handleLogout}
       />
 
-      <main className="flex-1 max-w-7xl w-full mx-auto px-4 sm:px-6 lg:px-8 py-8">
+      <main className="flex-1 max-w-7xl w-full mx-auto px-3 sm:px-6 lg:px-8 pt-4 sm:pt-7 pb-24 md:pb-8">
         {toast && (
           <div
             role="status"
-            className={`mb-6 px-4 py-3 rounded-xl border flex items-center justify-between gap-3 text-xs font-medium ${
+            className={`mb-4 sm:mb-6 px-4 py-3 rounded-2xl border flex items-center justify-between gap-3 text-xs font-medium ${
               toast.tone === 'warning'
                 ? 'bg-amber-50 border-amber-200 text-amber-900'
                 : 'bg-emerald-50 border-emerald-200 text-emerald-900'
             }`}
           >
-            <div className="flex items-center gap-2">
-              <CheckCircle2 className="w-4 h-4 shrink-0" aria-hidden="true" />
+            <div className="flex items-center gap-2.5">
+              <div
+                className={`w-7 h-7 rounded-lg flex items-center justify-center shrink-0 ${
+                  toast.tone === 'warning' ? 'bg-amber-100' : 'bg-emerald-100'
+                }`}
+              >
+                <CheckCircle2 className="w-4 h-4 shrink-0" aria-hidden="true" />
+              </div>
               <span>{toast.message}</span>
             </div>
             <button
               type="button"
               onClick={() => setToast(null)}
               aria-label="Bildirimi kapat"
-              className="p-1 rounded hover:bg-black/5 cursor-pointer"
+              className="min-w-[36px] min-h-[36px] flex items-center justify-center rounded-lg hover:bg-black/5 cursor-pointer"
             >
-              <X className="w-3.5 h-3.5" />
+              <X className="w-4 h-4" />
             </button>
           </div>
         )}
 
-        {activeTab === 'schedule' && (
+        {effectiveTab === 'schedule' && (
           <CourtScheduleView
             schedule={schedule}
             loading={scheduleLoading}
@@ -239,22 +259,22 @@ export default function App() {
           />
         )}
 
-        {activeTab === 'portal' && (
+        {effectiveTab === 'portal' && (
           <ResidentPortalView
             session={session}
             onOpenResidentLogin={() => {
               loadAuthStatus();
               setAuthModalOpen(true);
             }}
-            onGoToSchedule={() => setActiveTab('schedule')}
+            onGoToSchedule={() => handleSelectTab('schedule')}
             onRequestCancel={handleReservationToCancel}
             refreshTrigger={portalRefreshTick}
           />
         )}
 
-        {activeTab === 'rules' && <RulesView />}
+        {effectiveTab === 'rules' && <RulesView />}
 
-        {activeTab === 'admin' && (
+        {effectiveTab === 'admin' && (
           <AdminConsoleView
             session={session}
             adminSetupNeeded={authStatus?.adminSetupNeeded ?? false}
@@ -265,12 +285,12 @@ export default function App() {
         )}
       </main>
 
-      <footer className="border-t border-slate-200 bg-white">
+      <footer className="hidden md:block border-t border-slate-200 bg-white">
         <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-5 flex flex-col sm:flex-row items-center justify-between gap-3 text-xs text-slate-500">
-          <span>Site Tenis Kortu Kullanım ve Rezervasyon Sistemi · Kullanım Saatleri 07:00 - 23:00</span>
+          <span>Soyak Siesta Tenis Kortu · Kullanım Saatleri 07:00 - 23:00</span>
           <button
             type="button"
-            onClick={() => setActiveTab('rules')}
+            onClick={() => handleSelectTab('rules')}
             className="text-slate-600 hover:text-slate-900 underline cursor-pointer"
           >
             Kullanım Esaslarını Görüntüle

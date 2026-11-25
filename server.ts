@@ -8,6 +8,7 @@ import {
   claimAdminPasscodeHash,
   constantTimeEqualStrings,
   db,
+  encryptPasscodeForAdmin,
   generateReadablePasscode,
   getAllApartmentSummaries,
   getApartmentRuleContext,
@@ -675,7 +676,7 @@ async function startServer() {
     try {
       const clock = getClockNow();
       const [apartments, reservationRows, penaltyRows] = await Promise.all([
-        getAllApartmentSummaries(clock.nowMs),
+        getAllApartmentSummaries(clock.nowMs, { includePasscodes: true }),
         db.queryAll<RawReservationRow>('SELECT * FROM reservations ORDER BY start_ms DESC LIMIT 100'),
         db.queryAll<RawPenaltyRow>('SELECT * FROM penalties ORDER BY created_at_ms DESC LIMIT 100'),
       ]);
@@ -704,9 +705,13 @@ async function startServer() {
       const passwordRaw =
         typeof req.body?.password === 'string' ? req.body.password.trim() : '';
 
-      if (!apartmentNo || apartmentNo.length > 20 || !/^[A-Za-z0-9-]+$/.test(apartmentNo)) {
+      if (
+        !apartmentNo ||
+        apartmentNo.length > 24 ||
+        !/^[A-Za-z0-9ğüşıöçĞÜŞİÖÇ./\-\s]+$/.test(apartmentNo)
+      ) {
         res.status(400).json({
-          error: 'Geçerli bir daire numarası girin (harf, rakam veya tire, en fazla 20 karakter).',
+          error: 'Geçerli bir daire/blok numarası girin (en fazla 24 karakter, örn: B1-12 veya K2/4).',
         });
         return;
       }
@@ -716,7 +721,7 @@ async function startServer() {
         [apartmentNo]
       );
       if (existing) {
-        res.status(409).json({ error: `Daire ${apartmentNo} zaten kayıtlı.` });
+        res.status(409).json({ error: `${apartmentNo} zaten kayıtlı.` });
         return;
       }
 
@@ -727,11 +732,12 @@ async function startServer() {
 
       const generated = passwordRaw || generateReadablePasscode(8);
       const hash = hashPasscode(generated);
+      const encrypted = encryptPasscodeForAdmin(generated);
       const residentLabel = residentLabelRaw || `Daire ${apartmentNo}`;
 
       await db.execute(
-        'INSERT INTO apartments (apartment_no, resident_label, password_hash, ban_until_ms, ban_reason, created_at_ms) VALUES (?, ?, ?, NULL, NULL, ?)',
-        [apartmentNo, residentLabel, hash, Date.now()]
+        'INSERT INTO apartments (apartment_no, resident_label, password_hash, password_encrypted, ban_until_ms, ban_reason, created_at_ms) VALUES (?, ?, ?, ?, NULL, NULL, ?)',
+        [apartmentNo, residentLabel, hash, encrypted, Date.now()]
       );
 
       broadcastEvent({ type: 'directory:changed' });
@@ -744,6 +750,24 @@ async function startServer() {
     } catch (err) {
       console.error('Add apartment error:', err);
       res.status(500).json({ error: 'Daire eklenirken hata oluştu.' });
+    }
+  });
+
+  // Delete an apartment unit (Admin only)
+  app.delete('/api/admin/apartments/:apartmentNo', requireAuth('admin'), async (req, res) => {
+    try {
+      const apartmentNo = req.params.apartmentNo.trim();
+      const info = await db.execute('DELETE FROM apartments WHERE apartment_no = ?', [apartmentNo]);
+      if (info.changes === 0) {
+        res.status(404).json({ error: 'Daire bulunamadı.' });
+        return;
+      }
+      broadcastEvent({ type: 'directory:changed' });
+      broadcastEvent({ type: 'apartment:changed', apartmentNo });
+      res.json({ ok: true });
+    } catch (err) {
+      console.error('Delete apartment error:', err);
+      res.status(500).json({ error: 'Daire silinirken hata oluştu.' });
     }
   });
 
@@ -770,11 +794,12 @@ async function startServer() {
 
       const issuedPasscode = customPassword || generateReadablePasscode(8);
       const hash = hashPasscode(issuedPasscode);
+      const encrypted = encryptPasscodeForAdmin(issuedPasscode);
 
-      await db.execute('UPDATE apartments SET password_hash = ? WHERE apartment_no = ?', [
-        hash,
-        apartmentNo,
-      ]);
+      await db.execute(
+        'UPDATE apartments SET password_hash = ?, password_encrypted = ? WHERE apartment_no = ?',
+        [hash, encrypted, apartmentNo]
+      );
 
       broadcastEvent({ type: 'directory:changed' });
 
@@ -806,10 +831,11 @@ async function startServer() {
         for (const row of missingRows) {
           const passcode = generateReadablePasscode(8);
           const hash = hashPasscode(passcode);
-          await tx.execute('UPDATE apartments SET password_hash = ? WHERE apartment_no = ?', [
-            hash,
-            row.apartment_no,
-          ]);
+          const encrypted = encryptPasscodeForAdmin(passcode);
+          await tx.execute(
+            'UPDATE apartments SET password_hash = ?, password_encrypted = ? WHERE apartment_no = ?',
+            [hash, encrypted, row.apartment_no]
+          );
           issued.push({ apartmentNo: row.apartment_no, passcode });
         }
       });

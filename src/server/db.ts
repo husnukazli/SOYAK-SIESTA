@@ -30,6 +30,7 @@ export const isPostgres = Boolean(databaseUrl);
 let pgPool: Pool | null = null;
 let sqliteDb: Database.Database | null = null;
 let sqliteTxMutex: Promise<void> = Promise.resolve();
+let runtimeCipherKey: Buffer | null = null;
 
 function toPgPlaceholders(sql: string): string {
   let idx = 0;
@@ -143,7 +144,6 @@ export async function withTransaction<T>(fn: (tx: DbExecutor) => Promise<T>): Pr
     }
   }
 
-  // Serialize async SQLite transactions on the single local connection
   let release!: () => void;
   const prev = sqliteTxMutex;
   sqliteTxMutex = new Promise<void>((resolve) => {
@@ -161,7 +161,7 @@ export async function withTransaction<T>(fn: (tx: DbExecutor) => Promise<T>): Pr
     try {
       conn.exec('ROLLBACK');
     } catch {
-      // Ignore rollback failure if not in transaction
+      // Ignore rollback failure
     }
     throw err;
   } finally {
@@ -182,10 +182,13 @@ export async function initDatabase(): Promise<void> {
         apartment_no TEXT PRIMARY KEY,
         resident_label TEXT NOT NULL,
         password_hash TEXT,
+        password_encrypted TEXT,
         ban_until_ms BIGINT,
         ban_reason TEXT,
         created_at_ms BIGINT NOT NULL
       );
+
+      ALTER TABLE apartments ADD COLUMN IF NOT EXISTS password_encrypted TEXT;
 
       CREATE TABLE IF NOT EXISTS reservations (
         id SERIAL PRIMARY KEY,
@@ -245,6 +248,7 @@ export async function initDatabase(): Promise<void> {
         apartment_no TEXT PRIMARY KEY,
         resident_label TEXT NOT NULL,
         password_hash TEXT,
+        password_encrypted TEXT,
         ban_until_ms INTEGER,
         ban_reason TEXT,
         created_at_ms INTEGER NOT NULL
@@ -285,22 +289,43 @@ export async function initDatabase(): Promise<void> {
       CREATE INDEX IF NOT EXISTS idx_penalties_apt_created
         ON penalties(apartment_no, created_at_ms);
     `);
+
+    const cols = conn.prepare('PRAGMA table_info(apartments)').all() as { name: string }[];
+    if (!cols.some((c) => c.name === 'password_encrypted')) {
+      conn.exec('ALTER TABLE apartments ADD COLUMN password_encrypted TEXT');
+    }
   }
 
-  // Seed initial residential unit directory (Daire 1..20) without preset passcodes
-  const countRow = await db.queryOne<{ cnt: string | number }>(
-    'SELECT COUNT(*) as cnt FROM apartments'
-  );
-  if (Number(countRow?.cnt ?? 0) === 0) {
-    const now = Date.now();
-    await withTransaction(async (tx) => {
-      for (let i = 1; i <= 20; i++) {
-        await tx.execute(
-          'INSERT INTO apartments (apartment_no, resident_label, password_hash, ban_until_ms, ban_reason, created_at_ms) VALUES (?, ?, NULL, NULL, NULL, ?)',
-          [String(i), `Daire ${i}`, now]
+  // Initialize passcode recovery encryption key:
+  // Prefer PASSCODE_ENCRYPTION_KEY or SESSION_SECRET from env; otherwise persist a generated key in settings
+  const envCipherSecret =
+    process.env.PASSCODE_ENCRYPTION_KEY?.trim() || process.env.SESSION_SECRET?.trim();
+  if (envCipherSecret && envCipherSecret.length >= 16) {
+    runtimeCipherKey = crypto.createHash('sha256').update(envCipherSecret).digest();
+  } else {
+    const existingKeyRow = await db.queryOne<{ value: string }>(
+      "SELECT value FROM settings WHERE key = 'passcode_cipher_key'"
+    );
+    if (existingKeyRow?.value) {
+      runtimeCipherKey = Buffer.from(existingKeyRow.value, 'hex');
+    } else {
+      const generatedHex = crypto.randomBytes(32).toString('hex');
+      if (isPostgres) {
+        await db.execute(
+          "INSERT INTO settings (key, value) VALUES ('passcode_cipher_key', ?) ON CONFLICT (key) DO NOTHING",
+          [generatedHex]
+        );
+      } else {
+        await db.execute(
+          "INSERT OR IGNORE INTO settings (key, value) VALUES ('passcode_cipher_key', ?)",
+          [generatedHex]
         );
       }
-    });
+      const row = await db.queryOne<{ value: string }>(
+        "SELECT value FROM settings WHERE key = 'passcode_cipher_key'"
+      );
+      runtimeCipherKey = Buffer.from(row?.value || generatedHex, 'hex');
+    }
   }
 }
 
@@ -309,6 +334,35 @@ const SESSION_SECRET =
   process.env.SESSION_SECRET && process.env.SESSION_SECRET.trim().length >= 16
     ? process.env.SESSION_SECRET.trim()
     : crypto.randomBytes(32).toString('hex');
+
+export function encryptPasscodeForAdmin(plainPasscode: string): string {
+  if (!runtimeCipherKey) {
+    throw new Error('Şifreleme anahtarı başlatılmadı.');
+  }
+  const iv = crypto.randomBytes(12);
+  const cipher = crypto.createCipheriv('aes-256-gcm', runtimeCipherKey, iv);
+  const encrypted = Buffer.concat([cipher.update(plainPasscode, 'utf8'), cipher.final()]);
+  const tag = cipher.getAuthTag();
+  return `${iv.toString('hex')}:${tag.toString('hex')}:${encrypted.toString('hex')}`;
+}
+
+export function decryptPasscodeForAdmin(stored: string | null | undefined): string | null {
+  if (!stored || !runtimeCipherKey) return null;
+  const parts = stored.split(':');
+  if (parts.length !== 3) return null;
+  try {
+    const [ivHex, tagHex, dataHex] = parts;
+    const iv = Buffer.from(ivHex, 'hex');
+    const tag = Buffer.from(tagHex, 'hex');
+    const data = Buffer.from(dataHex, 'hex');
+    const decipher = crypto.createDecipheriv('aes-256-gcm', runtimeCipherKey, iv);
+    decipher.setAuthTag(tag);
+    const decrypted = Buffer.concat([decipher.update(data), decipher.final()]);
+    return decrypted.toString('utf8');
+  } catch {
+    return null;
+  }
+}
 
 export function hashPasscode(passcode: string): string {
   const salt = crypto.randomBytes(16).toString('hex');
@@ -577,7 +631,8 @@ export function sortApartmentNumbers(a: string, b: string): number {
 }
 
 export async function getAllApartmentSummaries(
-  nowMs: number = Date.now()
+  nowMs: number = Date.now(),
+  options: { includePasscodes?: boolean } = {}
 ): Promise<ApartmentSummary[]> {
   const cutoff15d = nowMs - LATE_CANCEL_WINDOW_DAYS * 24 * 60 * 60 * 1000;
 
@@ -585,9 +640,12 @@ export async function getAllApartmentSummaries(
     apartment_no: string;
     resident_label: string;
     password_hash: string | null;
+    password_encrypted: string | null;
     ban_until_ms: number | string | null;
     ban_reason: string | null;
-  }>('SELECT apartment_no, resident_label, password_hash, ban_until_ms, ban_reason FROM apartments');
+  }>(
+    'SELECT apartment_no, resident_label, password_hash, password_encrypted, ban_until_ms, ban_reason FROM apartments'
+  );
 
   const lateCounts = await db.queryAll<{ apartment_no: string; cnt: number | string }>(
     "SELECT apartment_no, COUNT(*) as cnt FROM penalties WHERE type = 'late_cancellation' AND created_at_ms >= ? GROUP BY apartment_no",
@@ -619,6 +677,9 @@ export async function getAllApartmentSummaries(
         apartmentNo: aptRow.apartment_no,
         residentLabel: aptRow.resident_label,
         hasPassword: Boolean(aptRow.password_hash),
+        ...(options.includePasscodes
+          ? { visiblePasscode: decryptPasscodeForAdmin(aptRow.password_encrypted) }
+          : {}),
         banUntilMs: activeBanUntil,
         banReason: activeBanUntil ? aptRow.ban_reason : null,
         lateCancelsLast15d: lateMap.get(aptRow.apartment_no) ?? 0,

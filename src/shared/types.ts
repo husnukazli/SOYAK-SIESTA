@@ -41,6 +41,7 @@ export interface ApartmentSummary {
   apartmentNo: string;
   residentLabel: string;
   hasPassword: boolean;
+  visiblePasscode?: string | null;
   banUntilMs: number | null;
   banReason: string | null;
   lateCancelsLast15d: number;

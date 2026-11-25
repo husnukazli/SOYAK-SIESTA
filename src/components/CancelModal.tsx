@@ -62,44 +62,46 @@ export function CancelModal({
 
   return (
     <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/50 backdrop-blur-xs p-4"
+      className="fixed inset-0 z-50 flex items-end sm:items-center justify-center bg-slate-900/50 backdrop-blur-xs p-0 sm:p-4"
       role="dialog"
       aria-modal="true"
       aria-labelledby="cancel-modal-title"
     >
-      <div className="w-full max-w-md bg-white border border-slate-200 rounded-xl shadow-xl overflow-hidden">
-        <div className="flex items-center justify-between px-6 py-4 border-b border-slate-200">
-          <h2 id="cancel-modal-title" className="font-display text-base font-semibold text-slate-900">
+      <div className="w-full sm:max-w-md bg-white border border-slate-200 rounded-t-3xl sm:rounded-2xl shadow-xl overflow-hidden max-h-[92vh] overflow-y-auto">
+        <div className="w-10 h-1.5 bg-slate-300 rounded-full mx-auto mt-3 mb-1 sm:hidden" />
+
+        <div className="flex items-center justify-between px-5 sm:px-6 py-4 border-b border-slate-200">
+          <h2 id="cancel-modal-title" className="font-display text-base font-bold text-slate-900">
             Rezervasyon İptali
           </h2>
           <button
             type="button"
             onClick={onClose}
             aria-label="Pencereyi kapat"
-            className="p-1.5 text-slate-500 hover:text-slate-900 rounded-md hover:bg-slate-100 cursor-pointer"
+            className="min-w-[44px] min-h-[44px] flex items-center justify-center text-slate-500 hover:text-slate-900 rounded-xl hover:bg-slate-100 cursor-pointer"
           >
-            <X className="w-4 h-4" />
+            <X className="w-5 h-5" />
           </button>
         </div>
 
-        <div className="p-6 space-y-5">
-          <div className="p-4 bg-slate-50 border border-slate-200 rounded-lg space-y-1">
-            <p className="text-sm font-semibold text-slate-900">
+        <div className="p-5 sm:p-6 space-y-4">
+          <div className="p-4 bg-slate-50 border border-slate-200 rounded-2xl space-y-1">
+            <p className="text-sm font-bold text-slate-900">
               {formatTurkishDateFull(target.dateStr)}
             </p>
-            <p className="font-mono text-xs text-slate-700">{formatHourRange(target.hour)}</p>
+            <p className="font-mono text-xs font-semibold text-slate-700">{formatHourRange(target.hour)}</p>
             <p className="font-mono text-xs text-slate-500 pt-1">
               Başlangıca kalan süre: {formatRemainingDuration(remainingMs)}
             </p>
           </div>
 
           {isAlreadyStarted ? (
-            <div className="p-3.5 bg-red-50 border border-red-200 rounded-lg text-xs text-red-800">
+            <div className="p-3.5 bg-red-50 border border-red-200 rounded-2xl text-xs text-red-800">
               Başlangıç saati gelmiş veya geçmiş rezervasyonlar iptal edilemez.
             </div>
           ) : isLate ? (
             <div
-              className={`p-4 rounded-lg border text-xs space-y-1.5 ${
+              className={`p-4 rounded-2xl border text-xs space-y-1.5 ${
                 willTriggerBan
                   ? 'bg-red-50 border-red-200 text-red-900'
                   : 'bg-amber-50 border-amber-200 text-amber-900'
@@ -120,7 +122,7 @@ export function CancelModal({
               </p>
             </div>
           ) : (
-            <div className="p-4 bg-emerald-50 border border-emerald-200 rounded-lg text-xs text-emerald-900 flex items-start gap-2.5">
+            <div className="p-4 bg-emerald-50 border border-emerald-200 rounded-2xl text-xs text-emerald-900 flex items-start gap-2.5">
               <CheckCircle2 className="w-4 h-4 shrink-0 mt-0.5 text-emerald-700" aria-hidden="true" />
               <p className="leading-relaxed">
                 Başlangıç saatine 4 saatten fazla süre bulunduğu için iptal işlemi ücretsiz ve cezasız yapılacaktır.
@@ -129,16 +131,16 @@ export function CancelModal({
           )}
 
           {error && (
-            <div role="alert" className="p-3 bg-red-50 border border-red-200 rounded-lg text-xs text-red-800">
+            <div role="alert" className="p-3 bg-red-50 border border-red-200 rounded-xl text-xs text-red-800">
               {error}
             </div>
           )}
 
-          <div className="flex items-center justify-end gap-3">
+          <div className="grid grid-cols-2 gap-2.5">
             <button
               type="button"
               onClick={onClose}
-              className="px-4 py-2.5 text-xs font-medium text-slate-700 bg-slate-100 hover:bg-slate-200 rounded-lg transition-colors whitespace-nowrap cursor-pointer"
+              className="min-h-[48px] px-4 py-2.5 text-xs font-semibold text-slate-700 bg-slate-100 hover:bg-slate-200 rounded-xl transition-colors whitespace-nowrap cursor-pointer"
             >
               Vazgeç
             </button>
@@ -146,7 +148,7 @@ export function CancelModal({
               type="button"
               disabled={loading || isAlreadyStarted}
               onClick={handleConfirm}
-              className={`px-5 py-2.5 text-xs font-semibold text-white rounded-lg transition-colors whitespace-nowrap disabled:opacity-50 cursor-pointer ${
+              className={`min-h-[48px] px-5 py-2.5 text-xs font-semibold text-white rounded-xl transition-colors whitespace-nowrap disabled:opacity-50 cursor-pointer ${
                 isLate
                   ? 'bg-red-700 hover:bg-red-800'
                   : 'bg-slate-900 hover:bg-slate-800'
@@ -156,7 +158,7 @@ export function CancelModal({
                 ? 'İptal Ediliyor...'
                 : isLate
                 ? 'Geç İptali Onayla'
-                : 'Rezervasyonu İptal Et'}
+                : 'İptal Et'}
             </button>
           </div>
         </div>
