@@ -1,0 +1,6 @@
+{
+  "name": "Kort Rezervasyon Sistemi",
+  "description": "Site tenis kortu çevrim içi rezervasyon, iptal, kullanım kuralları ve yönetim paneli.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
