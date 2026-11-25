@@ -1,4 +1,4 @@
-import type { PlayType, SlotEligibility } from '../shared/types.js';
+import type { PlayType, SlotEligibility } from '../shared/types.ts';
 
 export const COURT_OPEN_HOUR = 7;
 export const COURT_CLOSE_HOUR = 23; // last slot starts at 22:00 and ends at 23:00
