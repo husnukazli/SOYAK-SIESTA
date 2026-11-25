@@ -12,6 +12,7 @@ import type {
   ScheduleResponse,
   WeatherResponse,
 } from '../shared/types';
+import { KARSIYAKA_OPEN_METEO_URL, parseOpenMeteoPayload } from '../shared/weather';
 
 export interface AuthStatusResponse {
   adminSetupNeeded: boolean;
@@ -102,7 +103,21 @@ export const api = {
     return apiFetch<ScheduleResponse>(`/api/schedule${query}`, {}, token);
   },
 
-  getWeather: () => apiFetch<WeatherResponse>('/api/weather'),
+  getWeather: async (): Promise<WeatherResponse> => {
+    const serverWeather = await apiFetch<WeatherResponse>('/api/weather');
+    if (serverWeather.available) {
+      return serverWeather;
+    }
+    try {
+      const directRes = await fetch(KARSIYAKA_OPEN_METEO_URL);
+      if (directRes.ok) {
+        return parseOpenMeteoPayload(await directRes.json());
+      }
+    } catch {
+      // Ignore direct browser weather failure
+    }
+    return serverWeather;
+  },
 
   getResidentPortal: (token: string) =>
     apiFetch<ResidentPortalResponse>('/api/resident/portal', {}, token),

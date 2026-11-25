@@ -39,6 +39,7 @@ import {
   COURT_OPEN_HOUR,
   evaluateSlotEligibility,
   FREE_CANCEL_HOURS,
+  getIstanbulClock,
   getSlotBoundsMs,
   isPrimeHour,
   isValidDateStr,
@@ -49,6 +50,11 @@ import {
   shiftDateStr,
   VIOLATION_BAN_DAYS,
 } from './src/server/rules.ts';
+import {
+  describeWmoCode,
+  KARSIYAKA_OPEN_METEO_URL,
+  parseOpenMeteoPayload,
+} from './src/shared/weather.ts';
 import type {
   AdminOverviewResponse,
   AuthSession,
@@ -1337,24 +1343,269 @@ async function startServer() {
     }
   });
 
-  // İzmir · Karşıyaka weather forecast (15-min cached proxy via Open-Meteo, keyless & free)
-  const KARSIYAKA_WEATHER_URL =
-    'https://api.open-meteo.com/v1/forecast?latitude=38.4556&longitude=27.1103&current=temperature_2m,weather_code,wind_speed_10m&hourly=temperature_2m,precipitation_probability,weather_code,wind_speed_10m&daily=weather_code,temperature_2m_max,temperature_2m_min,precipitation_probability_max,wind_speed_10m_max&timezone=Europe%2FIstanbul&forecast_days=8';
-  const WEATHER_CACHE_TTL_MS = 15 * 60 * 1000;
-  let weatherCache: { expiresAtMs: number; data: WeatherResponse } | null = null;
+  // İzmir · Karşıyaka weather forecast (30-min memory + DB cache, Open-Meteo + MET Norway fallback, 429 cooldown)
+  const KARSIYAKA_MET_NO_URL =
+    'https://api.met.no/weatherapi/locationforecast/2.0/compact?lat=38.4556&lon=27.1103';
+  const WEATHER_CACHE_TTL_MS = 30 * 60 * 1000;
+  const OPEN_METEO_COOLDOWN_MS = 30 * 60 * 1000;
+  const FAILURE_COOLDOWN_MS = 5 * 60 * 1000;
 
-  function describeWmoCode(code: number): string {
-    if (code === 0) return 'Açık';
-    if (code === 1) return 'Az Bulutlu';
-    if (code === 2) return 'Parçalı Bulutlu';
-    if (code === 3) return 'Bulutlu';
-    if (code === 45 || code === 48) return 'Sisli';
-    if ([51, 53, 55, 56, 57].includes(code)) return 'Çisenti';
-    if ([61, 63, 65, 66, 67].includes(code)) return 'Yağmurlu';
-    if ([71, 73, 75, 77, 85, 86].includes(code)) return 'Karlı';
-    if ([80, 81, 82].includes(code)) return 'Sağanak';
-    if ([95, 96, 99].includes(code)) return 'Fırtınalı';
-    return 'Bulutlu';
+  let weatherCache: { expiresAtMs: number; data: WeatherResponse } | null = null;
+  let openMeteoCooldownUntilMs = 0;
+  let weatherFailureCooldownUntilMs = 0;
+  let weatherInFlight: Promise<WeatherResponse> | null = null;
+
+  function metSymbolToWmo(symbolCode: string | undefined): number {
+    const s = (symbolCode || '').toLowerCase();
+    if (!s) return 2;
+    if (s.includes('thunder')) return 95;
+    if (s.includes('snow') || s.includes('sleet')) return 71;
+    if (s.includes('rainshowers')) return 80;
+    if (s.includes('rain')) return 61;
+    if (s.includes('drizzle')) return 51;
+    if (s.includes('fog')) return 45;
+    if (s.startsWith('clearsky')) return 0;
+    if (s.startsWith('fair')) return 1;
+    if (s.startsWith('partlycloudy')) return 2;
+    if (s.startsWith('cloudy')) return 3;
+    return 2;
+  }
+
+  function estimateMetPrecipProb(symbolCode: string | undefined, precipMm: number): number {
+    const s = (symbolCode || '').toLowerCase();
+    if (precipMm >= 1.5 || s.includes('heavyrain')) return 85;
+    if (precipMm >= 0.3 || s.includes('rain') || s.includes('sleet') || s.includes('thunder')) return 65;
+    if (precipMm > 0 || s.includes('drizzle')) return 40;
+    if (s.includes('cloudy')) return 10;
+    return 0;
+  }
+
+  function parseMetNoPayload(rawInput: unknown, nowMs: number): WeatherResponse {
+    const raw = (rawInput ?? {}) as {
+      properties?: {
+        timeseries?: {
+          time?: string;
+          data?: {
+            instant?: { details?: { air_temperature?: number; wind_speed?: number } };
+            next_1_hours?: {
+              summary?: { symbol_code?: string };
+              details?: { precipitation_amount?: number };
+            };
+            next_6_hours?: {
+              summary?: { symbol_code?: string };
+              details?: { precipitation_amount?: number };
+            };
+          };
+        }[];
+      };
+    };
+
+    const series = raw.properties?.timeseries ?? [];
+    const hourly: WeatherHourlySlot[] = [];
+    const seenHour = new Set<string>();
+    const dailyAgg = new Map<
+      string,
+      {
+        minC: number;
+        maxC: number;
+        windMaxKmh: number;
+        precipProbMax: number;
+        repCode: number;
+        repPriority: number;
+      }
+    >();
+
+    let current: WeatherResponse['current'] = null;
+
+    for (const item of series) {
+      if (!item.time) continue;
+      const ms = Date.parse(item.time);
+      if (Number.isNaN(ms)) continue;
+      const ist = getIstanbulClock(ms);
+      const instant = item.data?.instant?.details;
+      const tempC = Math.round(Number(instant?.air_temperature ?? 0));
+      const windKmh = Math.round(Number(instant?.wind_speed ?? 0) * 3.6);
+      const next1 = item.data?.next_1_hours;
+      const next6 = item.data?.next_6_hours;
+      const symbolCode = next1?.summary?.symbol_code || next6?.summary?.symbol_code;
+      const precipMm = Number(
+        next1?.details?.precipitation_amount ?? next6?.details?.precipitation_amount ?? 0
+      );
+      const weatherCode = metSymbolToWmo(symbolCode);
+      const precipProb = estimateMetPrecipProb(symbolCode, precipMm);
+
+      if (!current) {
+        current = {
+          tempC,
+          weatherCode,
+          conditionLabel: describeWmoCode(weatherCode),
+          windKmh,
+        };
+      }
+
+      const key = `${ist.dateStr}-${ist.hour}`;
+      if (!seenHour.has(key)) {
+        seenHour.add(key);
+        hourly.push({
+          dateStr: ist.dateStr,
+          hour: ist.hour,
+          tempC,
+          weatherCode,
+          conditionLabel: describeWmoCode(weatherCode),
+          precipProb,
+          windKmh,
+        });
+      }
+
+      const existing = dailyAgg.get(ist.dateStr);
+      const priority = ist.hour >= 11 && ist.hour <= 16 ? 2 : ist.hour >= 7 && ist.hour <= 22 ? 1 : 0;
+      if (!existing) {
+        dailyAgg.set(ist.dateStr, {
+          minC: tempC,
+          maxC: tempC,
+          windMaxKmh: windKmh,
+          precipProbMax: precipProb,
+          repCode: weatherCode,
+          repPriority: priority,
+        });
+      } else {
+        existing.minC = Math.min(existing.minC, tempC);
+        existing.maxC = Math.max(existing.maxC, tempC);
+        existing.windMaxKmh = Math.max(existing.windMaxKmh, windKmh);
+        existing.precipProbMax = Math.max(existing.precipProbMax, precipProb);
+        if (priority >= existing.repPriority) {
+          existing.repCode = weatherCode;
+          existing.repPriority = priority;
+        }
+      }
+    }
+
+    const daily: WeatherDailyItem[] = Array.from(dailyAgg.entries())
+      .sort(([a], [b]) => a.localeCompare(b))
+      .map(([dateStr, agg]) => ({
+        dateStr,
+        weatherCode: agg.repCode,
+        conditionLabel: describeWmoCode(agg.repCode),
+        tempMinC: agg.minC,
+        tempMaxC: agg.maxC,
+        precipProbMax: agg.precipProbMax,
+        windMaxKmh: agg.windMaxKmh,
+      }));
+
+    return {
+      available: hourly.length > 0 && daily.length > 0,
+      locationLabel: 'İzmir · Karşıyaka',
+      fetchedAtMs: nowMs,
+      current,
+      daily,
+      hourly,
+    };
+  }
+
+  async function saveWeatherToDb(payload: WeatherResponse) {
+    try {
+      const serialized = JSON.stringify(payload);
+      if (isPostgres) {
+        await db.execute(
+          "INSERT INTO settings (key, value) VALUES ('weather_cache_v1', ?) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value",
+          [serialized]
+        );
+      } else {
+        await db.execute(
+          "INSERT OR REPLACE INTO settings (key, value) VALUES ('weather_cache_v1', ?)",
+          [serialized]
+        );
+      }
+    } catch {
+      // Non-critical cache persistence
+    }
+  }
+
+  async function loadWeatherFromDb(): Promise<WeatherResponse | null> {
+    try {
+      const row = await db.queryOne<{ value: string }>(
+        "SELECT value FROM settings WHERE key = 'weather_cache_v1'"
+      );
+      if (!row?.value) return null;
+      const parsed = JSON.parse(row.value) as WeatherResponse;
+      return parsed && parsed.available ? parsed : null;
+    } catch {
+      return null;
+    }
+  }
+
+  async function fetchFreshWeather(now: number): Promise<WeatherResponse> {
+    // 1. Try Open-Meteo when not on 429 cooldown
+    if (now >= openMeteoCooldownUntilMs) {
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 5000);
+      try {
+        const res = await fetch(KARSIYAKA_OPEN_METEO_URL, {
+          signal: controller.signal,
+          headers: { 'User-Agent': 'SoyakSiestaTenis/1.0' },
+        });
+        if (res.status === 429) {
+          openMeteoCooldownUntilMs = now + OPEN_METEO_COOLDOWN_MS;
+          console.warn('Open-Meteo rate-limited (429); switching to MET Norway fallback.');
+        } else if (res.ok) {
+          const parsed = parseOpenMeteoPayload(await res.json(), now);
+          if (parsed.available) {
+            weatherCache = { expiresAtMs: now + WEATHER_CACHE_TTL_MS, data: parsed };
+            void saveWeatherToDb(parsed);
+            return parsed;
+          }
+        }
+      } catch (err) {
+        openMeteoCooldownUntilMs = now + 10 * 60 * 1000;
+        console.warn('Open-Meteo fetch failed, trying MET Norway fallback:', (err as Error)?.message);
+      } finally {
+        clearTimeout(timeout);
+      }
+    }
+
+    // 2. Fallback provider: MET Norway Locationforecast (free, global ECMWF, separate rate limit)
+    const metController = new AbortController();
+    const metTimeout = setTimeout(() => metController.abort(), 5500);
+    try {
+      const metRes = await fetch(KARSIYAKA_MET_NO_URL, {
+        signal: metController.signal,
+        headers: {
+          'User-Agent': 'SoyakSiestaTenis/1.0 (https://soyaksiestatenis.onrender.com)',
+          Accept: 'application/json',
+        },
+      });
+      if (metRes.ok) {
+        const parsed = parseMetNoPayload(await metRes.json(), now);
+        if (parsed.available) {
+          weatherCache = { expiresAtMs: now + WEATHER_CACHE_TTL_MS, data: parsed };
+          void saveWeatherToDb(parsed);
+          return parsed;
+        }
+      } else {
+        console.warn(`MET Norway weather fallback HTTP ${metRes.status}`);
+      }
+    } catch (err) {
+      console.warn('MET Norway weather fallback failed:', (err as Error)?.message);
+    } finally {
+      clearTimeout(metTimeout);
+    }
+
+    // 3. Fallback to persisted DB / stale cache if still reasonably fresh (< 3 hours), else unavailable (client will try direct browser fetch)
+    weatherFailureCooldownUntilMs = now + FAILURE_COOLDOWN_MS;
+    const stale = weatherCache?.data ?? (await loadWeatherFromDb());
+    if (stale && now - stale.fetchedAtMs < 3 * 60 * 60 * 1000) {
+      weatherCache = { expiresAtMs: now + FAILURE_COOLDOWN_MS, data: stale };
+      return stale;
+    }
+
+    return {
+      available: false,
+      locationLabel: 'İzmir · Karşıyaka',
+      fetchedAtMs: now,
+      current: null,
+      daily: [],
+      hourly: [],
+    };
   }
 
   app.get('/api/weather', async (_req, res) => {
@@ -1364,109 +1615,39 @@ async function startServer() {
       return;
     }
 
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 5000);
-    try {
-      const upstream = await fetch(KARSIYAKA_WEATHER_URL, { signal: controller.signal });
-      if (!upstream.ok) {
-        throw new Error(`Weather upstream HTTP ${upstream.status}`);
-      }
-      const raw = (await upstream.json()) as {
-        current?: {
-          temperature_2m?: number;
-          weather_code?: number;
-          wind_speed_10m?: number;
+    if (!weatherCache) {
+      const dbCached = await loadWeatherFromDb();
+      if (dbCached && now - dbCached.fetchedAtMs < WEATHER_CACHE_TTL_MS) {
+        weatherCache = {
+          expiresAtMs: dbCached.fetchedAtMs + WEATHER_CACHE_TTL_MS,
+          data: dbCached,
         };
-        hourly?: {
-          time?: string[];
-          temperature_2m?: number[];
-          precipitation_probability?: number[];
-          weather_code?: number[];
-          wind_speed_10m?: number[];
-        };
-        daily?: {
-          time?: string[];
-          weather_code?: number[];
-          temperature_2m_max?: number[];
-          temperature_2m_min?: number[];
-          precipitation_probability_max?: number[];
-          wind_speed_10m_max?: number[];
-        };
-      };
-
-      const hourly: WeatherHourlySlot[] = [];
-      const hTimes = raw.hourly?.time ?? [];
-      for (let i = 0; i < hTimes.length; i++) {
-        const t = hTimes[i];
-        if (typeof t !== 'string' || t.length < 13) continue;
-        const dateStr = t.slice(0, 10);
-        const hour = Number(t.slice(11, 13));
-        if (!Number.isInteger(hour)) continue;
-        const weatherCode = Number(raw.hourly?.weather_code?.[i] ?? 0);
-        hourly.push({
-          dateStr,
-          hour,
-          tempC: Math.round(Number(raw.hourly?.temperature_2m?.[i] ?? 0)),
-          weatherCode,
-          conditionLabel: describeWmoCode(weatherCode),
-          precipProb: Math.round(Number(raw.hourly?.precipitation_probability?.[i] ?? 0)),
-          windKmh: Math.round(Number(raw.hourly?.wind_speed_10m?.[i] ?? 0)),
-        });
-      }
-
-      const daily: WeatherDailyItem[] = [];
-      const dTimes = raw.daily?.time ?? [];
-      for (let i = 0; i < dTimes.length; i++) {
-        const dateStr = dTimes[i];
-        if (typeof dateStr !== 'string') continue;
-        const weatherCode = Number(raw.daily?.weather_code?.[i] ?? 0);
-        daily.push({
-          dateStr,
-          weatherCode,
-          conditionLabel: describeWmoCode(weatherCode),
-          tempMinC: Math.round(Number(raw.daily?.temperature_2m_min?.[i] ?? 0)),
-          tempMaxC: Math.round(Number(raw.daily?.temperature_2m_max?.[i] ?? 0)),
-          precipProbMax: Math.round(Number(raw.daily?.precipitation_probability_max?.[i] ?? 0)),
-          windMaxKmh: Math.round(Number(raw.daily?.wind_speed_10m_max?.[i] ?? 0)),
-        });
-      }
-
-      const currentCode = Number(raw.current?.weather_code ?? 0);
-      const payload: WeatherResponse = {
-        available: true,
-        locationLabel: 'İzmir · Karşıyaka',
-        fetchedAtMs: now,
-        current: raw.current
-          ? {
-              tempC: Math.round(Number(raw.current.temperature_2m ?? 0)),
-              weatherCode: currentCode,
-              conditionLabel: describeWmoCode(currentCode),
-              windKmh: Math.round(Number(raw.current.wind_speed_10m ?? 0)),
-            }
-          : null,
-        daily,
-        hourly,
-      };
-
-      weatherCache = { expiresAtMs: now + WEATHER_CACHE_TTL_MS, data: payload };
-      res.json(payload);
-    } catch (err) {
-      console.error('Weather fetch error:', err);
-      if (weatherCache) {
-        res.json(weatherCache.data);
+        res.json(dbCached);
         return;
       }
-      res.json({
-        available: false,
-        locationLabel: 'İzmir · Karşıyaka',
-        fetchedAtMs: now,
-        current: null,
-        daily: [],
-        hourly: [],
-      } satisfies WeatherResponse);
-    } finally {
-      clearTimeout(timeout);
     }
+
+    if (now < weatherFailureCooldownUntilMs) {
+      res.json(
+        weatherCache?.data ?? {
+          available: false,
+          locationLabel: 'İzmir · Karşıyaka',
+          fetchedAtMs: now,
+          current: null,
+          daily: [],
+          hourly: [],
+        }
+      );
+      return;
+    }
+
+    if (!weatherInFlight) {
+      weatherInFlight = fetchFreshWeather(now).finally(() => {
+        weatherInFlight = null;
+      });
+    }
+    const result = await weatherInFlight;
+    res.json(result);
   });
 
   // Mount Vite middleware in development, or serve built dist/ in production
