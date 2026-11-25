@@ -1,4 +1,4 @@
-import Database from 'better-sqlite3';
+import type Database from 'better-sqlite3';
 import crypto from 'crypto';
 import fs from 'fs';
 import path from 'path';
@@ -63,14 +63,7 @@ function getPgPool(): Pool {
 
 function getSqliteDb(): Database.Database {
   if (!sqliteDb) {
-    const dataDir = path.resolve(process.cwd(), process.env.DATA_DIR?.trim() || 'data');
-    if (!fs.existsSync(dataDir)) {
-      fs.mkdirSync(dataDir, { recursive: true });
-    }
-    const dbPath = path.join(dataDir, 'kort.db');
-    sqliteDb = new Database(dbPath);
-    sqliteDb.pragma('journal_mode = WAL');
-    sqliteDb.pragma('foreign_keys = ON');
+    throw new Error('SQLite veritabanı başlatılmadı. Önce initDatabase() çağrılmalıdır.');
   }
   return sqliteDb;
 }
@@ -230,6 +223,17 @@ export async function initDatabase(): Promise<void> {
         ON penalties(apartment_no, created_at_ms);
     `);
   } else {
+    if (!sqliteDb) {
+      const { default: BetterSqlite3 } = await import('better-sqlite3');
+      const dataDir = path.resolve(process.cwd(), process.env.DATA_DIR?.trim() || 'data');
+      if (!fs.existsSync(dataDir)) {
+        fs.mkdirSync(dataDir, { recursive: true });
+      }
+      const dbPath = path.join(dataDir, 'kort.db');
+      sqliteDb = new BetterSqlite3(dbPath);
+      sqliteDb.pragma('journal_mode = WAL');
+      sqliteDb.pragma('foreign_keys = ON');
+    }
     const conn = getSqliteDb();
     conn.exec(`
       CREATE TABLE IF NOT EXISTS settings (
