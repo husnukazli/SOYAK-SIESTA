@@ -543,6 +543,8 @@ export function CourtScheduleView({
                 !slot.reservation &&
                 !slot.isPast &&
                 !canBook;
+              const isAdminOpenView =
+                session?.role === 'admin' && !slot.reservation && !slot.isPast;
 
               const isInteractive = canBook || canResidentClickGuest || canCancelOwn;
               const slotWeather = !slot.isPast
@@ -563,7 +565,7 @@ export function CourtScheduleView({
                 slot.primeTime &&
                 !slot.isPast &&
                 !slot.reservation &&
-                (canBook || canResidentClickGuest);
+                (canBook || canResidentClickGuest || isAdminOpenView);
 
               const cardClasses = isOwn
                 ? 'bg-emerald-50 border-2 border-emerald-600 shadow-[0_3px_0_0_#059669] hover:shadow-[0_4px_0_0_#047857] active:translate-y-[1px] active:shadow-[0_1px_0_0_#047857] text-slate-900'
@@ -572,9 +574,17 @@ export function CourtScheduleView({
                 : slot.isPast
                 ? 'bg-slate-100/85 border border-slate-300/80 shadow-[0_2px_0_0_#cbd5e1] text-slate-400'
                 : isOpenPrime
-                ? 'bg-cyan-50/95 border-[1.5px] border-cyan-400 shadow-[0_3px_0_0_#22d3ee] hover:border-cyan-600 hover:shadow-[0_4px_0_0_#0891b2] active:translate-y-[1px] active:shadow-[0_1px_0_0_#0891b2] text-slate-900'
-                : canBook || canResidentClickGuest
-                ? 'bg-white border-[1.5px] border-slate-300 shadow-[0_3px_0_0_#cbd5e1] hover:border-emerald-600 hover:shadow-[0_4px_0_0_#10b981] active:translate-y-[1px] active:shadow-[0_1px_0_0_#10b981] text-slate-900'
+                ? `bg-cyan-50/95 border-[1.5px] border-cyan-400 shadow-[0_3px_0_0_#22d3ee] text-slate-900 ${
+                    isInteractive
+                      ? 'hover:border-cyan-600 hover:shadow-[0_4px_0_0_#0891b2] active:translate-y-[1px] active:shadow-[0_1px_0_0_#0891b2]'
+                      : ''
+                  }`
+                : canBook || canResidentClickGuest || isAdminOpenView
+                ? `bg-white border-[1.5px] border-slate-300 shadow-[0_3px_0_0_#cbd5e1] text-slate-900 ${
+                    isInteractive
+                      ? 'hover:border-emerald-600 hover:shadow-[0_4px_0_0_#10b981] active:translate-y-[1px] active:shadow-[0_1px_0_0_#10b981]'
+                      : ''
+                  }`
                 : 'bg-amber-50/75 border-[1.5px] border-amber-300 shadow-[0_3px_0_0_#fcd34d] text-slate-700';
 
               const iconBoxClasses = isOwn
@@ -585,7 +595,7 @@ export function CourtScheduleView({
                 ? 'bg-slate-200 text-slate-500'
                 : isOpenPrime
                 ? 'bg-cyan-100 text-cyan-800'
-                : canBook || canResidentClickGuest
+                : canBook || canResidentClickGuest || isAdminOpenView
                 ? 'bg-emerald-100 text-emerald-800'
                 : 'bg-amber-100 text-amber-800';
 
@@ -772,6 +782,8 @@ export function CourtScheduleView({
                       <span className="text-emerald-700">Rezerve Et →</span>
                     ) : canResidentClickGuest ? (
                       <span className="text-slate-700">Giriş ile Ayırt →</span>
+                    ) : isAdminOpenView ? (
+                      <span className="text-emerald-800">Boş · Rezervasyona Açık</span>
                     ) : (
                       <span className="text-amber-800">Kısıtlı</span>
                     )}
