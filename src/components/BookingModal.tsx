@@ -1,12 +1,14 @@
 import { useEffect, useState } from 'react';
-import { CalendarCheck, CheckCircle2, Info, User, Users, X } from 'lucide-react';
+import { AlertTriangle, CalendarCheck, CheckCircle2, Info, User, Users, X } from 'lucide-react';
 import { api, ApiError, formatTurkishDateFull } from '../lib/api';
+import { FREE_CANCEL_HOURS } from '../shared/cancelPolicy';
 import type { PlayType, ReservationItem, ScheduleSlot } from '../shared/types';
 import { CalendarActions } from './CalendarActions';
 
 interface BookingModalProps {
   slot: ScheduleSlot | null;
   dateStr: string;
+  nowMs: number;
   apartmentNo: string;
   token: string;
   reservedByOtherApt?: string | null;
@@ -17,6 +19,7 @@ interface BookingModalProps {
 export function BookingModal({
   slot,
   dateStr,
+  nowMs,
   apartmentNo,
   token,
   reservedByOtherApt,
@@ -25,6 +28,7 @@ export function BookingModal({
 }: BookingModalProps) {
   const [playType, setPlayType] = useState<PlayType>('match');
   const [residentConfirmed, setResidentConfirmed] = useState(false);
+  const [lastMinuteConfirmed, setLastMinuteConfirmed] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [confirmedReservation, setConfirmedReservation] = useState<ReservationItem | null>(null);
@@ -33,6 +37,7 @@ export function BookingModal({
   useEffect(() => {
     setPlayType('match');
     setResidentConfirmed(false);
+    setLastMinuteConfirmed(false);
     setError(null);
     setConfirmedReservation(null);
   }, [slotHour, dateStr]);
@@ -41,11 +46,22 @@ export function BookingModal({
 
   const isPrime = slot.primeTime;
   const overrideUsed = slot.eligibility?.primeOverrideUsed ?? false;
+  const msUntilStart = slot.startMs - nowMs;
+  const isUnderOneHour = msUntilStart > 0 && msUntilStart < 60 * 60 * 1000;
+  const isAlreadyStartedSlot = msUntilStart <= 0;
+  const needsLastMinuteConfirm = isUnderOneHour || isAlreadyStartedSlot;
+  const remainingMinutes = Math.max(1, Math.ceil(msUntilStart / 60_000));
+  const isInsideThreeHourWindow =
+    msUntilStart > 0 && msUntilStart < FREE_CANCEL_HOURS * 60 * 60 * 1000;
 
   const handleConfirm = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!residentConfirmed) {
       setError('Kortu kullanan kişilerden en az birinin daire sakini olduğunu onaylamalısınız.');
+      return;
+    }
+    if (needsLastMinuteConfirm && !lastMinuteConfirmed) {
+      setError('Lütfen son 1 saat uyarısını onaylayarak devam edin.');
       return;
     }
     setLoading(true);
@@ -232,8 +248,47 @@ export function BookingModal({
               </span>
             </label>
 
+            {needsLastMinuteConfirm && (
+              <div
+                role="alert"
+                className="p-4 bg-amber-50 border-2 border-amber-300 rounded-2xl space-y-3 text-xs text-amber-950"
+              >
+                <div className="flex items-start gap-2.5">
+                  <AlertTriangle className="w-4 h-4 text-amber-700 shrink-0 mt-0.5" aria-hidden="true" />
+                  <p className="leading-relaxed font-medium">
+                    {isUnderOneHour ? (
+                      <>
+                        Oyun saatine{' '}
+                        <strong className="font-bold tabular-nums">{remainingMinutes} dakika</strong>{' '}
+                        kalmıştır. Rezervasyonu iptal ettiğinizde bu işlem{' '}
+                        <strong className="font-bold">geç iptal</strong> sayılacaktır. Emin misiniz?
+                      </>
+                    ) : (
+                      <>
+                        Bu kullanım saati başlamış durumdadır; rezervasyon sonrası iptal
+                        edilemez. Emin misiniz?
+                      </>
+                    )}
+                  </p>
+                </div>
+                <label className="flex items-center gap-2.5 pt-2 border-t border-amber-200/80 cursor-pointer font-semibold text-amber-950">
+                  <input
+                    type="checkbox"
+                    checked={lastMinuteConfirmed}
+                    onChange={(e) => setLastMinuteConfirmed(e.target.checked)}
+                    className="h-4 w-4 rounded border-amber-400 text-amber-700 focus:ring-amber-700 shrink-0"
+                  />
+                  <span>Evet, eminim ve rezervasyonu onaylıyorum</span>
+                </label>
+              </div>
+            )}
+
             <p className="text-[11px] text-slate-500 leading-relaxed">
-              Başlangıç saatinden 4 saat öncesine kadar cezasız iptal edilebilir. Onay sonrası rezervasyonunuzu 2 hatırlatıcı ile ajandanıza ekleyebilirsiniz.
+              {isUnderOneHour || isAlreadyStartedSlot
+                ? 'Onay sonrası rezervasyonunuzu 2 hatırlatıcı ile ajandanıza ekleyebilirsiniz.'
+                : isInsideThreeHourWindow
+                ? 'Son 3 saat içinde yapılan rezervasyonlar başlangıca 1 saat kalaya kadar cezasız iptal edilebilir. Onay sonrası rezervasyonunuzu ajandanıza ekleyebilirsiniz.'
+                : 'Başlangıç saatinden 3 saat öncesine kadar cezasız iptal edilebilir. Onay sonrası rezervasyonunuzu 2 hatırlatıcı ile ajandanıza ekleyebilirsiniz.'}
             </p>
 
             {reservedByOtherApt && (
@@ -258,10 +313,15 @@ export function BookingModal({
               </button>
               <button
                 type="submit"
-                disabled={loading || !residentConfirmed || Boolean(reservedByOtherApt)}
+                disabled={
+                  loading ||
+                  !residentConfirmed ||
+                  (needsLastMinuteConfirm && !lastMinuteConfirmed) ||
+                  Boolean(reservedByOtherApt)
+                }
                 className="min-h-[48px] px-5 py-2.5 text-xs font-semibold text-white bg-emerald-700 hover:bg-emerald-800 disabled:opacity-50 rounded-xl transition-colors whitespace-nowrap cursor-pointer"
               >
-                {loading ? 'Kaydediliyor...' : 'Onayla'}
+                {loading ? 'Kaydediliyor...' : needsLastMinuteConfirm ? 'Eminim, Onayla' : 'Onayla'}
               </button>
             </div>
           </form>

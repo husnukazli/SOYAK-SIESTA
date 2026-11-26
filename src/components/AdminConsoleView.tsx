@@ -1349,7 +1349,7 @@ export function AdminConsoleView({
                   [
                     { id: 'all', label: 'Tümü' },
                     { id: 'active', label: 'Aktif' },
-                    { id: 'cancelled_ontime', label: 'Ücretsiz İptal' },
+                    { id: 'cancelled_ontime', label: 'Cezasız İptal' },
                     { id: 'cancelled_late', label: 'Geç İptaller' },
                   ] as const
                 ).map((f) => (
@@ -1412,7 +1412,7 @@ export function AdminConsoleView({
                             ? 'Aktif'
                             : r.status === 'cancelled_late'
                             ? 'Geç İptal'
-                            : 'Ücretsiz İptal'}
+                            : 'Cezasız İptal'}
                         </span>
                       </p>
                     </div>
@@ -1481,7 +1481,7 @@ export function AdminConsoleView({
                           ) : r.status === 'cancelled_late' ? (
                             <span className="font-medium text-amber-800">Geç İptal</span>
                           ) : (
-                            <span className="text-slate-500">Ücretsiz İptal</span>
+                            <span className="text-slate-500">Cezasız İptal</span>
                           )}
                         </td>
                         <td className="px-5 py-3 text-right">
@@ -1763,7 +1763,7 @@ export function AdminConsoleView({
               </p>
               <p className="text-[11px] text-slate-500">
                 {stats.totalCancelled} iptal ({stats.cancelledLate} geç · {stats.cancelledOntime}{' '}
-                ücretsiz)
+                cezasız)
               </p>
             </div>
 

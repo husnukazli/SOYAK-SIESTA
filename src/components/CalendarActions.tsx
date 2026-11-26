@@ -22,7 +22,7 @@ export function CalendarActions({ reservation, compact = false }: CalendarAction
           <strong className="font-semibold text-slate-900">
             cezasız iptal saatinden 1 saat önce
           </strong>{' '}
-          (maçtan 5 saat önce) ve{' '}
+          (maçtan 4 saat önce) ve{' '}
           <strong className="font-semibold text-slate-900">oyun saatinden 1 saat önce</strong>.
         </p>
       </div>

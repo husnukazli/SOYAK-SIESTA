@@ -37,7 +37,7 @@ export function buildGoogleCalendarUrl(res: CalendarReservationInput): string {
   const details = [
     `Daire: ${res.apartmentNo}`,
     `Kullanım Türü: ${playLabel}`,
-    `Ücretsiz İptal Son Saati: Oyun saatinden 4 saat önce (öncesinde 1 saat kala hatırlatıcı kurmanız önerilir).`,
+    `Cezasız İptal Son Saati: Oyun saatinden 3 saat önce (son 3 saat içinde alınan kayıtlarda 1 saat önce).`,
   ].join('\n');
 
   const params = new URLSearchParams({
@@ -60,7 +60,7 @@ export function downloadIcsCalendarEvent(res: CalendarReservationInput): void {
     `Daire: ${res.apartmentNo}`,
     `Saat: ${formatHourRange(res.hour)}`,
     `Kullanım: ${playLabel}`,
-    'Hatırlatma 1: Cezasız iptal süresinin bitimine 1 saat kala (maçtan 5 saat önce).',
+    'Hatırlatma 1: Cezasız iptal süresinin bitimine 1 saat kala (maçtan 4 saat önce).',
     'Hatırlatma 2: Oyun saatinden 1 saat önce.',
   ].join('\n');
 
@@ -84,11 +84,11 @@ export function downloadIcsCalendarEvent(res: CalendarReservationInput): void {
     `DESCRIPTION:${escapeIcsText(description)}`,
     `LOCATION:${escapeIcsText('Soyak Siesta Tenis Kortu')}`,
     'STATUS:CONFIRMED',
-    // Alarm 1: 1 hour before the 4-hour free cancellation deadline (= 5 hours before match start)
+    // Alarm 1: 1 hour before the 3-hour penalty-free cancellation deadline (= 4 hours before match start)
     'BEGIN:VALARM',
-    'TRIGGER:-PT5H',
+    'TRIGGER:-PT4H',
     'ACTION:DISPLAY',
-    `DESCRIPTION:${escapeIcsText('Ücretsiz iptal süresinin bitmesine 1 saat kaldı (Soyak Siesta Tenis).')}`,
+    `DESCRIPTION:${escapeIcsText('Cezasız iptal süresinin bitmesine 1 saat kaldı (Soyak Siesta Tenis).')}`,
     'END:VALARM',
     // Alarm 2: 1 hour before match start
     'BEGIN:VALARM',

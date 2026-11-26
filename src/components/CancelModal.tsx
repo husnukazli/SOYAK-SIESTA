@@ -7,12 +7,14 @@ import {
   formatRemainingDuration,
   formatTurkishDateFull,
 } from '../lib/api';
+import { getCancelPolicyStatus } from '../shared/cancelPolicy';
 
 interface CancelTarget {
   id: number;
   dateStr: string;
   hour: number;
   startMs: number;
+  createdAtMs?: number;
 }
 
 interface CancelModalProps {
@@ -38,9 +40,9 @@ export function CancelModal({
   if (!target) return null;
 
   const remainingMs = target.startMs - nowMs;
-  const hoursRemaining = remainingMs / (60 * 60 * 1000);
-  const isAlreadyStarted = remainingMs <= 0;
-  const isLate = hoursRemaining < 4;
+  const policy = getCancelPolicyStatus(target.startMs, target.createdAtMs, nowMs);
+  const isAlreadyStarted = policy.isAlreadyStarted;
+  const isLate = policy.isLate;
   const willTriggerBan = isLate && lateCancelsLast15d >= 1;
 
   const handleConfirm = async () => {
@@ -112,20 +114,22 @@ export function CancelModal({
                 <span>
                   {willTriggerBan
                     ? 'Geç İptal — 1 Haftalık Kısıtlama Uygulanacak'
-                    : 'Geç İptal Uyarısı (4 Saatten Az Süre)'}
+                    : `Geç İptal Uyarısı (${policy.cutoffHours} Saatten Az Süre)`}
                 </span>
               </div>
               <p className="leading-relaxed">
                 {willTriggerBan
                   ? 'Son 15 gün içinde zaten 1 geç iptal kaydınız bulunuyor. Bu rezervasyonu şimdi iptal etmeniz halinde dairenize 1 haftalık rezervasyon hakkı iptali uygulanacaktır.'
-                  : 'Rezervasyon saatine 4 saatten az süre kaldığı için bu işlem geç iptal sayılacaktır. 15 günlük süreçteki ilk geç iptal için uyarı verilir; tekrarı halinde 1 haftalık rezervasyon hakkı iptal edilir.'}
+                  : `Rezervasyon saatine ${policy.cutoffHours} saatten az süre kaldığı için bu işlem geç iptal sayılacaktır. 15 günlük süreçteki ilk geç iptal için uyarı verilir; tekrarı halinde 1 haftalık rezervasyon hakkı iptal edilir.`}
               </p>
             </div>
           ) : (
             <div className="p-4 bg-emerald-50 border border-emerald-200 rounded-2xl text-xs text-emerald-900 flex items-start gap-2.5">
               <CheckCircle2 className="w-4 h-4 shrink-0 mt-0.5 text-emerald-700" aria-hidden="true" />
               <p className="leading-relaxed">
-                Başlangıç saatine 4 saatten fazla süre bulunduğu için iptal işlemi ücretsiz ve cezasız yapılacaktır.
+                {policy.bookedInsideGraceWindow
+                  ? 'Son 3 saat içinde yapılan rezervasyonlarda başlangıca 1 saatten fazla süre bulunduğu için iptal işlemi cezasız yapılacaktır.'
+                  : 'Başlangıç saatine 3 saatten fazla süre bulunduğu için iptal işlemi cezasız yapılacaktır.'}
               </p>
             </div>
           )}

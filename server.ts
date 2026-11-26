@@ -40,7 +40,6 @@ import {
   COURT_CLOSE_HOUR,
   COURT_OPEN_HOUR,
   evaluateSlotEligibility,
-  FREE_CANCEL_HOURS,
   getIstanbulClock,
   getSlotBoundsMs,
   isPrimeHour,
@@ -52,6 +51,7 @@ import {
   shiftDateStr,
   VIOLATION_BAN_DAYS,
 } from './src/server/rules.ts';
+import { getCancelPolicyStatus } from './src/shared/cancelPolicy.ts';
 import {
   describeWmoCode,
   KARSIYAKA_OPEN_METEO_URL,
@@ -547,6 +547,7 @@ async function startServer() {
                 apartmentNo: resItem.apartmentNo,
                 playType: resItem.playType,
                 isOwn: viewerAptNo === resItem.apartmentNo,
+                createdAtMs: resItem.createdAtMs,
               }
             : null,
           eligibility,
@@ -717,7 +718,7 @@ async function startServer() {
     }
   });
 
-  // Cancel reservation (enforces 4-hour cutoff & 15-day repeat late cancellation 1-week ban)
+  // Cancel reservation (enforces 3-hour / 1-hour late-booking cutoff & 15-day repeat late cancellation 1-week ban)
   app.post('/api/reservations/:id/cancel', requireAuth('resident'), async (req: AuthenticatedRequest, res) => {
     const apartmentNo = req.session!.apartmentNo!;
     const resId = Number(req.params.id);
@@ -746,16 +747,17 @@ async function startServer() {
         }
 
         const startMs = Number(row.start_ms);
+        const createdAtMs = Number(row.created_at_ms);
         const slotHour = Number(row.hour);
-        if (startMs <= clock.nowMs) {
+        const cancelPolicy = getCancelPolicyStatus(startMs, createdAtMs, clock.nowMs);
+        if (cancelPolicy.isAlreadyStarted) {
           throw {
             status: 400,
             message: 'Başlangıç saati geçmiş veya başlamış bir rezervasyon iptal edilemez.',
           };
         }
 
-        const hoursUntilStart = (startMs - clock.nowMs) / (60 * 60 * 1000);
-        const isLate = hoursUntilStart < FREE_CANCEL_HOURS;
+        const isLate = cancelPolicy.isLate;
 
         if (!isLate) {
           await tx.execute(
@@ -767,7 +769,9 @@ async function startServer() {
             lateCancel: false,
             penaltyAction: null as 'warning' | 'ban_7d' | null,
             banUntilMs: null as number | null,
-            message: 'Rezervasyon 4 saatten uzun süre kala ücretsiz olarak iptal edildi.',
+            message: cancelPolicy.bookedInsideGraceWindow
+              ? 'Rezervasyon başlangıç saatine 1 saatten fazla süre kala cezasız olarak iptal edildi.'
+              : 'Rezervasyon 3 saatten uzun süre kala cezasız olarak iptal edildi.',
             cancelledReservation: { dateStr: row.date_str, hour: slotHour },
           };
         }

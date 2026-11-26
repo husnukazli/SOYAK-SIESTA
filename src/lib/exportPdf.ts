@@ -155,7 +155,7 @@ export function exportArchiveToPdf(backup: SystemBackupPayload, todayStr: string
     {
       label: 'İptal Kayıtları',
       value: String(lateCancelCount + ontimeCancelCount),
-      sub: `${lateCancelCount} geç · ${ontimeCancelCount} ücretsiz`,
+      sub: `${lateCancelCount} geç · ${ontimeCancelCount} cezasız`,
       accent: '#b45309',
     },
     {
@@ -375,7 +375,7 @@ export function exportArchiveToPdf(backup: SystemBackupPayload, todayStr: string
         ctx.fillText('Geç İptal', cx, y + 23);
       } else {
         ctx.fillStyle = '#64748b';
-        ctx.fillText('Ücretsiz İptal', cx, y + 23);
+        ctx.fillText('Cezasız İptal', cx, y + 23);
       }
 
       y += rowH;

@@ -56,11 +56,13 @@ const GENERAL_RULES: RuleItem[] = [
   },
   {
     number: '06',
-    title: 'Ücretsiz İptal (4 Saat)',
+    title: 'Cezasız İptal (3 Saat / 1 Saat)',
     content: (
       <>
         Rezervasyon başlangıcından en geç{' '}
-        <strong className="font-semibold tabular-nums text-slate-900">4 saat</strong> öncesine kadar cezasız iptal edilebilir.
+        <strong className="font-semibold tabular-nums text-slate-900">3 saat</strong> öncesine kadar cezasız iptal edilebilir. Başlangıca{' '}
+        <strong className="font-semibold tabular-nums text-slate-900">3 saatten az</strong> kala yapılan rezervasyonlarda ise başlangıç saatine{' '}
+        <strong className="font-semibold tabular-nums text-slate-900">1 saat</strong> kalaya kadar cezasız iptal hakkı bulunur.
       </>
     ),
   },
@@ -103,10 +105,11 @@ export function RulesView() {
         <div className="grid grid-cols-1 md:grid-cols-2 divide-y md:divide-y-0 md:divide-x divide-red-200 bg-white/60">
           <div className="p-6 space-y-2">
             <h3 className="font-display text-base sm:text-lg font-bold text-red-800">
-              1. Geç İptal Cezası (4 Saatten Az Kala)
+              1. Geç İptal Cezası (3 Saatten Az Kala)
             </h3>
             <p className="text-base sm:text-[17px] text-red-900 leading-relaxed">
-              Başlangıca <strong className="font-bold tabular-nums">4 saatten kısa süre kala</strong> yapılan iptaller geç iptal sayılır.{' '}
+              Başlangıca <strong className="font-bold tabular-nums">3 saatten kısa süre kala</strong> yapılan iptaller geç iptal sayılır (son 3 saat içinde yapılan rezervasyonlarda bu sınır{' '}
+              <strong className="font-bold tabular-nums">1 saattir</strong>).{' '}
               <strong className="font-bold tabular-nums">15 gün içinde ilk geç iptal için uyarı</strong> verilir; tekrarı halinde{' '}
               <strong className="font-bold underline decoration-red-400">
                 1 hafta boyunca rezervasyon hakkı iptal edilir

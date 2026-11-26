@@ -59,6 +59,7 @@ export default function App() {
     dateStr: string;
     hour: number;
     startMs: number;
+    createdAtMs?: number;
   } | null>(null);
 
   const [toast, setToast] = useState<{ message: string; tone: 'success' | 'warning' } | null>(null);
@@ -247,6 +248,7 @@ export default function App() {
       dateStr: schedule?.dateStr || selectedDate,
       hour: slot.hour,
       startMs: slot.startMs,
+      createdAtMs: slot.reservation.createdAtMs,
     });
   };
 
@@ -256,6 +258,7 @@ export default function App() {
       dateStr: res.dateStr,
       hour: res.hour,
       startMs: res.startMs,
+      createdAtMs: res.createdAtMs,
     });
   };
 
@@ -406,6 +409,7 @@ export default function App() {
         <BookingModal
           slot={bookingSlot}
           dateStr={schedule?.dateStr || selectedDate}
+          nowMs={schedule?.nowMs ?? Date.now()}
           apartmentNo={session.apartmentNo}
           token={session.token}
           reservedByOtherApt={reservedByOtherInModal}

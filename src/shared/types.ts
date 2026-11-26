@@ -74,6 +74,7 @@ export interface ScheduleSlot {
     apartmentNo: string;
     playType: PlayType;
     isOwn: boolean;
+    createdAtMs: number;
   } | null;
   eligibility: SlotEligibility | null;
 }

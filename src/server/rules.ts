@@ -1,11 +1,12 @@
 import type { PlayType, SlotEligibility } from '../shared/types.ts';
+import { FREE_CANCEL_HOURS, LATE_BOOKING_FREE_CANCEL_HOURS } from '../shared/cancelPolicy.ts';
 
+export { FREE_CANCEL_HOURS, LATE_BOOKING_FREE_CANCEL_HOURS };
 export const COURT_OPEN_HOUR = 7;
 export const COURT_CLOSE_HOUR = 23; // last slot starts at 22:00 and ends at 23:00
 export const PRIME_HOURS = new Set([18, 19, 20]);
 export const PRIME_OVERRIDE_HOUR = 15;
 export const MAX_BOOKING_DAYS_AHEAD = 6;
-export const FREE_CANCEL_HOURS = 4;
 export const LATE_CANCEL_WINDOW_DAYS = 15;
 export const LATE_CANCEL_BAN_DAYS = 7;
 export const VIOLATION_BAN_DAYS = 30;

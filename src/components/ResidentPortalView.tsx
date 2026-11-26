@@ -15,6 +15,7 @@ import {
   formatRemainingDuration,
   formatTurkishDateFull,
 } from '../lib/api';
+import { getCancelPolicyStatus } from '../shared/cancelPolicy';
 import type { AuthSession, ResidentPortalResponse, ReservationItem } from '../shared/types';
 import { CalendarActions } from './CalendarActions';
 
@@ -113,9 +114,11 @@ export function ResidentPortalView({
 
   const { apartment, reservations, penalties, nowMs } = data;
   const activeRes = apartment.activeReservation;
-  const canCancelActive = activeRes ? activeRes.startMs > nowMs : false;
-  const hoursUntilStart = activeRes ? (activeRes.startMs - nowMs) / (60 * 60 * 1000) : 0;
-  const isLateWindow = activeRes ? hoursUntilStart < 4 : false;
+  const cancelPolicy = activeRes
+    ? getCancelPolicyStatus(activeRes.startMs, activeRes.createdAtMs, nowMs)
+    : null;
+  const canCancelActive = activeRes ? !cancelPolicy?.isAlreadyStarted : false;
+  const isLateWindow = cancelPolicy?.isLate ?? false;
 
   return (
     <div className="space-y-5 sm:space-y-7">
@@ -271,10 +274,10 @@ export function ResidentPortalView({
                   </span>
                   <span aria-hidden="true">·</span>
                   <span className={isLateWindow ? 'text-amber-700 font-semibold' : 'text-slate-500'}>
-                    {canCancelActive
+                    {canCancelActive && cancelPolicy
                       ? isLateWindow
                         ? `Başlangıca ${formatRemainingDuration(activeRes.startMs - nowMs)} (Geç İptal)`
-                        : `Ücretsiz iptale ${formatRemainingDuration(activeRes.startMs - nowMs - 4 * 3600000)}`
+                        : `Cezasız iptale ${formatRemainingDuration(cancelPolicy.msUntilPenaltyFreeDeadline)}`
                       : 'Kullanım saati devam ediyor'}
                   </span>
                 </div>
@@ -398,7 +401,7 @@ export function ResidentPortalView({
                         : 'Aktif'
                       : r.status === 'cancelled_late'
                       ? 'Geç İptal'
-                      : 'Ücretsiz İptal'}
+                      : 'Cezasız İptal'}
                   </span>
                 </div>
               ))}
@@ -435,7 +438,7 @@ export function ResidentPortalView({
                         ) : r.status === 'cancelled_late' ? (
                           <span className="font-medium text-amber-800">Geç İptal</span>
                         ) : (
-                          <span className="text-slate-500">Ücretsiz İptal</span>
+                          <span className="text-slate-500">Cezasız İptal</span>
                         )}
                       </td>
                     </tr>
