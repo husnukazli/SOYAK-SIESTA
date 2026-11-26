@@ -67,7 +67,7 @@ async function apiFetch<T>(
 }
 
 export const api = {
-  getAuthStatus: () => apiFetch<AuthStatusResponse>('/api/auth/status'),
+  getAuthStatus: () => apiFetch<AuthStatusResponse>('/api/auth/status', { cache: 'no-store' }),
 
   setupAdmin: (passcode: string) =>
     apiFetch<{ token: string; role: 'admin' }>('/api/auth/admin/setup', {
@@ -75,10 +75,10 @@ export const api = {
       body: JSON.stringify({ passcode }),
     }),
 
-  loginAdmin: (passcode: string) =>
+  loginAdmin: (passcode: string, rememberMe = false) =>
     apiFetch<{ token: string; role: 'admin' }>('/api/auth/admin/login', {
       method: 'POST',
-      body: JSON.stringify({ passcode }),
+      body: JSON.stringify({ passcode, rememberMe }),
     }),
 
   loginResident: (apartmentNo: string, password: string, rememberMe = false) =>
@@ -91,13 +91,15 @@ export const api = {
     ),
 
   restoreSession: () =>
-    apiFetch<{ session: Omit<AuthSession, 'token'>; token?: string }>('/api/auth/me'),
+    apiFetch<{ session: Omit<AuthSession, 'token'>; token?: string }>('/api/auth/me', {
+      cache: 'no-store',
+    }),
 
   logoutSession: () =>
     apiFetch<{ ok: boolean }>('/api/auth/logout', { method: 'POST' }),
 
   verifySession: (token: string) =>
-    apiFetch<{ session: Omit<AuthSession, 'token'> }>('/api/auth/me', {}, token),
+    apiFetch<{ session: Omit<AuthSession, 'token'> }>('/api/auth/me', { cache: 'no-store' }, token),
 
   getSchedule: (dateStr?: string, token?: string | null) => {
     const query = dateStr ? `?date=${encodeURIComponent(dateStr)}` : '';

@@ -208,7 +208,7 @@ export function AuthModal({
             <div className="leading-snug">
               <span className="block text-sm font-semibold text-slate-800">Beni hatırla</span>
               <span className="block text-xs text-slate-500">
-                Bu cihazda 30 gün boyunca tekrar şifre sorma
+                Tarayıcı kapansa bile bu cihazda 30 gün oturumu açık tut
               </span>
             </div>
           </label>

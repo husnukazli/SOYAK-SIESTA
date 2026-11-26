@@ -26,9 +26,24 @@ import type {
   WeatherResponse,
 } from './shared/types';
 
+const VALID_TABS: ActiveTab[] = ['schedule', 'portal', 'partners', 'rules', 'admin'];
+
+function getInitialActiveTab(): ActiveTab {
+  try {
+    const saved = window.sessionStorage.getItem('soyak_active_tab');
+    if (saved && VALID_TABS.includes(saved as ActiveTab)) {
+      return saved as ActiveTab;
+    }
+  } catch {
+    // Ignore storage access restrictions
+  }
+  return 'schedule';
+}
+
 export default function App() {
-  const [activeTab, setActiveTab] = useState<ActiveTab>('schedule');
+  const [activeTab, setActiveTab] = useState<ActiveTab>(getInitialActiveTab);
   const [session, setSession] = useState<AuthSession | null>(null);
+  const [authRestoring, setAuthRestoring] = useState<boolean>(true);
   const [authStatus, setAuthStatus] = useState<AuthStatusResponse | null>(null);
 
   const [selectedDate, setSelectedDate] = useState<string>(() => getTodayIstanbulDateStr());
@@ -82,11 +97,24 @@ export default function App() {
   );
 
   useEffect(() => {
+    try {
+      window.sessionStorage.setItem('soyak_active_tab', activeTab);
+    } catch {
+      // Ignore storage access restrictions
+    }
+  }, [activeTab]);
+
+  useEffect(() => {
     loadAuthStatus();
     api
       .restoreSession()
       .then((res) => {
-        if (res.session?.role === 'resident' && res.session.apartmentNo && res.token) {
+        if (res.session?.role === 'admin' && res.token) {
+          setSession({
+            role: 'admin',
+            token: res.token,
+          });
+        } else if (res.session?.role === 'resident' && res.session.apartmentNo && res.token) {
           setSession({
             role: 'resident',
             apartmentNo: res.session.apartmentNo,
@@ -95,7 +123,10 @@ export default function App() {
         }
       })
       .catch(() => {
-        // No remembered session cookie
+        // No active session cookie
+      })
+      .finally(() => {
+        setAuthRestoring(false);
       });
   }, [loadAuthStatus]);
 
@@ -202,6 +233,9 @@ export default function App() {
   const handleLogout = () => {
     api.logoutSession().catch(() => {});
     setSession(null);
+    if (activeTab === 'admin') {
+      setActiveTab('schedule');
+    }
     setToast({ message: 'Oturum kapatıldı.', tone: 'success' });
     loadSchedule();
   };
@@ -300,18 +334,23 @@ export default function App() {
           />
         )}
 
-        {effectiveTab === 'portal' && (
-          <ResidentPortalView
-            session={session}
-            onOpenResidentLogin={() => {
-              loadAuthStatus();
-              setAuthModalOpen(true);
-            }}
-            onGoToSchedule={() => handleSelectTab('schedule')}
-            onRequestCancel={handleReservationToCancel}
-            refreshTrigger={portalRefreshTick}
-          />
-        )}
+        {effectiveTab === 'portal' &&
+          (authRestoring && !session ? (
+            <div className="max-w-md mx-auto bg-white border border-slate-200 rounded-2xl p-8 text-center text-xs text-slate-500">
+              Oturum kontrol ediliyor...
+            </div>
+          ) : (
+            <ResidentPortalView
+              session={session}
+              onOpenResidentLogin={() => {
+                loadAuthStatus();
+                setAuthModalOpen(true);
+              }}
+              onGoToSchedule={() => handleSelectTab('schedule')}
+              onRequestCancel={handleReservationToCancel}
+              refreshTrigger={portalRefreshTick}
+            />
+          ))}
 
         {effectiveTab === 'partners' && (
           <PartnerBoardView
@@ -326,15 +365,20 @@ export default function App() {
 
         {effectiveTab === 'rules' && <RulesView />}
 
-        {effectiveTab === 'admin' && (
-          <AdminConsoleView
-            session={session}
-            adminSetupNeeded={authStatus?.adminSetupNeeded ?? false}
-            onAuthenticated={handleAuthenticated}
-            onRefreshAuthStatus={loadAuthStatus}
-            refreshTrigger={portalRefreshTick}
-          />
-        )}
+        {effectiveTab === 'admin' &&
+          (authRestoring && !session ? (
+            <div className="max-w-md mx-auto bg-white border border-slate-200 rounded-2xl p-8 text-center text-xs text-slate-500">
+              Oturum kontrol ediliyor...
+            </div>
+          ) : (
+            <AdminConsoleView
+              session={session}
+              adminSetupNeeded={authStatus?.adminSetupNeeded ?? false}
+              onAuthenticated={handleAuthenticated}
+              onRefreshAuthStatus={loadAuthStatus}
+              refreshTrigger={portalRefreshTick}
+            />
+          ))}
       </main>
 
       <footer className="hidden md:block border-t border-slate-200 bg-white">

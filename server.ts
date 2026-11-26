@@ -84,12 +84,48 @@ interface AuthenticatedRequest extends Request {
   session?: Omit<AuthSession, 'token'>;
 }
 
+const SESSION_COOKIE = 'soyak_session';
 const RESIDENT_REMEMBER_COOKIE = 'soyak_resident_session';
-const REMEMBER_TTL_MS = 30 * 24 * 60 * 60 * 1000;
-const REMEMBER_MAX_AGE_SEC = 30 * 24 * 60 * 60;
+const RESIDENT_REMEMBER_TTL_MS = 30 * 24 * 60 * 60 * 1000;
+const RESIDENT_REMEMBER_MAX_AGE_SEC = 30 * 24 * 60 * 60;
+const ADMIN_REMEMBER_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+const ADMIN_REMEMBER_MAX_AGE_SEC = 7 * 24 * 60 * 60;
 
-function buildRememberCookieHeader(value: string, maxAgeSec: number): string {
-  return `${RESIDENT_REMEMBER_COOKIE}=${encodeURIComponent(value)}; HttpOnly; Secure; SameSite=None; Partitioned; Path=/; Max-Age=${maxAgeSec}`;
+function buildSessionCookieHeader(
+  name: string,
+  value: string,
+  maxAgeSec?: number
+): string {
+  const parts = [
+    `${name}=${encodeURIComponent(value)}`,
+    'HttpOnly',
+    'Secure',
+    'SameSite=None',
+    'Partitioned',
+    'Path=/',
+  ];
+  if (typeof maxAgeSec === 'number') {
+    parts.push(`Max-Age=${maxAgeSec}`);
+  }
+  return parts.join('; ');
+}
+
+function setActiveSessionCookies(
+  res: Response,
+  token: string,
+  maxAgeSec?: number
+): void {
+  res.setHeader('Set-Cookie', [
+    buildSessionCookieHeader(SESSION_COOKIE, token, maxAgeSec),
+    buildSessionCookieHeader(RESIDENT_REMEMBER_COOKIE, '', 0),
+  ]);
+}
+
+function clearAllSessionCookies(res: Response): void {
+  res.setHeader('Set-Cookie', [
+    buildSessionCookieHeader(SESSION_COOKIE, '', 0),
+    buildSessionCookieHeader(RESIDENT_REMEMBER_COOKIE, '', 0),
+  ]);
 }
 
 function hasSameOriginOrAjaxHeader(req: Request): boolean {
@@ -229,6 +265,7 @@ async function startServer() {
         residentLabel: a.residentLabel,
         hasPassword: a.hasPassword,
       }));
+      res.setHeader('Cache-Control', 'no-store');
       res.json({
         adminSetupNeeded: setupNeeded,
         apartments,
@@ -239,8 +276,9 @@ async function startServer() {
     }
   });
 
-  // Verify current Bearer session or restore remembered HttpOnly resident cookie session
+  // Verify current Bearer session or restore HttpOnly cookie session (both resident & admin)
   app.get('/api/auth/me', async (req, res) => {
+    res.setHeader('Cache-Control', 'no-store');
     try {
       const bearer = parseBearerSession(req);
       if (bearer) {
@@ -249,15 +287,32 @@ async function startServer() {
       }
 
       const cookies = parseCookies(req.headers.cookie);
-      const cookieToken = cookies[RESIDENT_REMEMBER_COOKIE];
+      const cookieToken = cookies[SESSION_COOKIE] || cookies[RESIDENT_REMEMBER_COOKIE];
       if (!cookieToken) {
         res.status(401).json({ error: 'Aktif oturum bulunamadı.' });
         return;
       }
 
       const parsed = verifySessionToken(cookieToken);
-      if (!parsed || parsed.role !== 'resident' || !parsed.apartmentNo) {
-        res.setHeader('Set-Cookie', buildRememberCookieHeader('', 0));
+      if (!parsed) {
+        clearAllSessionCookies(res);
+        res.status(401).json({ error: 'Aktif oturum bulunamadı.' });
+        return;
+      }
+
+      if (parsed.role === 'admin') {
+        const hasAdminConfigured = Boolean(getEnvAdminPasscode() || (await getStoredAdminHash()));
+        if (!hasAdminConfigured) {
+          clearAllSessionCookies(res);
+          res.status(401).json({ error: 'Aktif oturum geçersiz.' });
+          return;
+        }
+        res.json({ session: { role: 'admin' }, token: cookieToken });
+        return;
+      }
+
+      if (parsed.role !== 'resident' || !parsed.apartmentNo) {
+        clearAllSessionCookies(res);
         res.status(401).json({ error: 'Aktif oturum bulunamadı.' });
         return;
       }
@@ -267,7 +322,7 @@ async function startServer() {
         [parsed.apartmentNo]
       );
       if (!row || !row.password_hash) {
-        res.setHeader('Set-Cookie', buildRememberCookieHeader('', 0));
+        clearAllSessionCookies(res);
         res.status(401).json({ error: 'Aktif oturum geçersiz.' });
         return;
       }
@@ -279,13 +334,14 @@ async function startServer() {
     }
   });
 
-  // Clear Remember Me resident cookie on explicit logout
+  // Clear session cookies on explicit logout
   app.post('/api/auth/logout', (req, res) => {
     if (!hasSameOriginOrAjaxHeader(req)) {
       res.status(403).json({ error: 'Geçersiz istek kaynağı.' });
       return;
     }
-    res.setHeader('Set-Cookie', buildRememberCookieHeader('', 0));
+    res.setHeader('Cache-Control', 'no-store');
+    clearAllSessionCookies(res);
     res.json({ ok: true });
   });
 
@@ -317,6 +373,7 @@ async function startServer() {
       }
 
       const token = signSessionToken({ role: 'admin' });
+      setActiveSessionCookies(res, token);
       res.json({ token, role: 'admin' });
     } catch (err) {
       console.error('Admin setup error:', err);
@@ -324,10 +381,11 @@ async function startServer() {
     }
   });
 
-  // Admin login
+  // Admin login (+ session or 7-day persistent HttpOnly cookie)
   app.post('/api/auth/admin/login', async (req, res) => {
     try {
       const rawPasscode = typeof req.body?.passcode === 'string' ? req.body.passcode.trim() : '';
+      const rememberMe = req.body?.rememberMe === true;
       if (!rawPasscode) {
         res.status(400).json({ error: 'Lütfen yönetici şifresini girin.' });
         return;
@@ -351,7 +409,11 @@ async function startServer() {
         return;
       }
 
-      const token = signSessionToken({ role: 'admin' });
+      const token = signSessionToken(
+        { role: 'admin' },
+        rememberMe ? ADMIN_REMEMBER_TTL_MS : undefined
+      );
+      setActiveSessionCookies(res, token, rememberMe ? ADMIN_REMEMBER_MAX_AGE_SEC : undefined);
       res.json({ token, role: 'admin' });
     } catch (err) {
       console.error('Admin login error:', err);
@@ -359,7 +421,7 @@ async function startServer() {
     }
   });
 
-  // Resident login by apartment number + assigned password (+ optional 30-day Remember Me cookie)
+  // Resident login by apartment number + assigned password (+ session or 30-day HttpOnly cookie)
   app.post('/api/auth/resident/login', async (req, res) => {
     try {
       const apartmentNo =
@@ -397,14 +459,14 @@ async function startServer() {
 
       const token = signSessionToken(
         { role: 'resident', apartmentNo: row.apartment_no },
-        rememberMe ? REMEMBER_TTL_MS : undefined
+        rememberMe ? RESIDENT_REMEMBER_TTL_MS : undefined
       );
 
-      if (rememberMe) {
-        res.setHeader('Set-Cookie', buildRememberCookieHeader(token, REMEMBER_MAX_AGE_SEC));
-      } else {
-        res.setHeader('Set-Cookie', buildRememberCookieHeader('', 0));
-      }
+      setActiveSessionCookies(
+        res,
+        token,
+        rememberMe ? RESIDENT_REMEMBER_MAX_AGE_SEC : undefined
+      );
 
       res.json({ token, role: 'resident', apartmentNo: row.apartment_no });
     } catch (err) {

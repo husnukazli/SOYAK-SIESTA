@@ -81,6 +81,7 @@ export function AdminConsoleView({
   // Login / First-run setup form state
   const [passcode, setPasscode] = useState('');
   const [confirmPasscode, setConfirmPasscode] = useState('');
+  const [adminRememberMe, setAdminRememberMe] = useState(false);
   const [authLoading, setAuthLoading] = useState(false);
   const [authError, setAuthError] = useState<string | null>(null);
 
@@ -352,7 +353,7 @@ export function AdminConsoleView({
     setAuthError(null);
     setAuthLoading(true);
     try {
-      const res = await api.loginAdmin(passcode.trim());
+      const res = await api.loginAdmin(passcode.trim(), adminRememberMe);
       setPasscode('');
       onAuthenticated({ role: 'admin', token: res.token });
     } catch (err) {
@@ -413,6 +414,23 @@ export function AdminConsoleView({
                 required
               />
             </div>
+          )}
+
+          {!adminSetupNeeded && (
+            <label className="flex items-center gap-3 min-h-[48px] px-3.5 py-2.5 border border-slate-200 rounded-xl bg-slate-50/70 hover:bg-slate-50 cursor-pointer transition-colors">
+              <input
+                type="checkbox"
+                checked={adminRememberMe}
+                onChange={(e) => setAdminRememberMe(e.target.checked)}
+                className="h-5 w-5 rounded border-slate-300 text-slate-900 focus:ring-slate-900 shrink-0"
+              />
+              <div className="leading-snug">
+                <span className="block text-sm font-semibold text-slate-800">Beni hatırla</span>
+                <span className="block text-xs text-slate-500">
+                  Tarayıcı kapansa bile bu cihazda 7 gün oturumu açık tut
+                </span>
+              </div>
+            </label>
           )}
 
           {authError && (
