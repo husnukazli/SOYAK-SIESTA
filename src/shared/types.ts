@@ -109,6 +109,55 @@ export interface AdminOverviewResponse {
   penalties: PenaltyItem[];
   nowMs: number;
   todayStr: string;
+  databaseMode?: 'postgres' | 'sqlite';
+}
+
+export interface BackupApartmentRecord {
+  apartmentNo: string;
+  residentLabel: string;
+  passcode: string | null;
+  passwordHash: string | null;
+  banUntilMs: number | null;
+  banReason: string | null;
+  createdAtMs: number;
+}
+
+export interface BackupPartnerPostRecord {
+  id: number;
+  apartmentNo: string;
+  nickname: string;
+  skillLevel: number;
+  sessionFormat: PartnerFormat;
+  dateStr: string;
+  startHour: number;
+  endHour: number;
+  note: string | null;
+  status: PartnerPostStatus;
+  createdAtMs: number;
+}
+
+export interface BackupPartnerReplyRecord {
+  id: number;
+  postId: number;
+  apartmentNo: string;
+  nickname: string;
+  message: string;
+  createdAtMs: number;
+}
+
+export interface SystemBackupPayload {
+  version: 1;
+  app: 'soyaksiestatenis';
+  exportedAtMs: number;
+  exportedAtLabel: string;
+  sourceDatabase: 'postgres' | 'sqlite';
+  data: {
+    apartments: BackupApartmentRecord[];
+    reservations: ReservationItem[];
+    penalties: PenaltyItem[];
+    partnerPosts: BackupPartnerPostRecord[];
+    partnerReplies: BackupPartnerReplyRecord[];
+  };
 }
 
 export interface PartnerReplyItem {

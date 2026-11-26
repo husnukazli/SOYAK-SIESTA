@@ -8,6 +8,7 @@ import {
   claimAdminPasscodeHash,
   constantTimeEqualStrings,
   db,
+  decryptPasscodeForAdmin,
   encryptPasscodeForAdmin,
   generateReadablePasscode,
   getAllApartmentSummaries,
@@ -30,6 +31,7 @@ import {
   type RawPenaltyRow,
   type RawReservationRow,
   signSessionToken,
+  sortApartmentNumbers,
   verifyPasscodeHash,
   verifySessionToken,
   withTransaction,
@@ -58,15 +60,21 @@ import {
 import type {
   AdminOverviewResponse,
   AuthSession,
+  BackupApartmentRecord,
+  BackupPartnerPostRecord,
+  BackupPartnerReplyRecord,
   PartnerBoardResponse,
   PartnerFormat,
   PartnerPostStatus,
   PartnerReplyItem,
+  PenaltyItem,
   PlayType,
   RealtimeEvent,
+  ReservationItem,
   ResidentPortalResponse,
   ScheduleResponse,
   ScheduleSlot,
+  SystemBackupPayload,
   WeatherDailyItem,
   WeatherHourlySlot,
   WeatherResponse,
@@ -135,9 +143,22 @@ function isUniqueConstraintError(err: unknown): boolean {
 async function startServer() {
   await initDatabase();
   console.log(`Database initialized (${isPostgres ? 'PostgreSQL' : 'SQLite local'})`);
+  if (process.env.NODE_ENV === 'production' && !isPostgres) {
+    console.warn(
+      'UYARI: DATABASE_URL tanımlı olmadığı için geçici yerel SQLite kullanılıyor. Render güncellemelerinde veriler sıfırlanabilir; kalıcı kayıt için DATABASE_URL bağlayın.'
+    );
+  }
 
   const app = express();
-  app.use(express.json({ limit: '100kb' }));
+  const standardJsonParser = express.json({ limit: '100kb' });
+  const restoreJsonParser = express.json({ limit: '5mb' });
+  app.use((req, res, next) => {
+    if (req.path === '/api/admin/restore') {
+      restoreJsonParser(req, res, next);
+    } else {
+      standardJsonParser(req, res, next);
+    }
+  });
 
   const httpServer = http.createServer(app);
   const wss = new WebSocketServer({ server: httpServer, path: '/ws' });
@@ -179,6 +200,11 @@ async function startServer() {
 
   wss.on('close', () => {
     clearInterval(heartbeatInterval);
+  });
+
+  // Ultra-lightweight ping for uptime monitors (GET / HEAD)
+  app.get('/api/ping', (_req, res) => {
+    res.status(200).json({ ok: true });
   });
 
   // Health check
@@ -780,11 +806,450 @@ async function startServer() {
         penalties: penaltyRows.map(mapPenaltyRow),
         nowMs: clock.nowMs,
         todayStr: clock.dateStr,
+        databaseMode: isPostgres ? 'postgres' : 'sqlite',
       };
       res.json(payload);
     } catch (err) {
       console.error('Admin overview error:', err);
       res.status(500).json({ error: 'Yönetim verileri yüklenemedi.' });
+    }
+  });
+
+  // Full system JSON backup export (Admin only — excludes admin_passcode_hash & cipher secrets)
+  app.get('/api/admin/backup', requireAuth('admin'), async (_req, res) => {
+    try {
+      const clock = getClockNow();
+      const [aptRows, resRows, penRows, postRows, replyRows] = await Promise.all([
+        db.queryAll<{
+          apartment_no: string;
+          resident_label: string;
+          password_hash: string | null;
+          password_encrypted: string | null;
+          ban_until_ms: number | string | null;
+          ban_reason: string | null;
+          created_at_ms: number | string;
+        }>(
+          'SELECT apartment_no, resident_label, password_hash, password_encrypted, ban_until_ms, ban_reason, created_at_ms FROM apartments'
+        ),
+        db.queryAll<RawReservationRow>('SELECT * FROM reservations ORDER BY id ASC'),
+        db.queryAll<RawPenaltyRow>('SELECT * FROM penalties ORDER BY id ASC'),
+        db.queryAll<RawPartnerPostRow>('SELECT * FROM partner_posts ORDER BY id ASC'),
+        db.queryAll<RawPartnerReplyRow>('SELECT * FROM partner_replies ORDER BY id ASC'),
+      ]);
+
+      const apartments: BackupApartmentRecord[] = aptRows
+        .sort((a, b) => sortApartmentNumbers(a.apartment_no, b.apartment_no))
+        .map((row) => {
+          const decrypted = decryptPasscodeForAdmin(row.password_encrypted);
+          return {
+            apartmentNo: row.apartment_no,
+            residentLabel: row.resident_label,
+            passcode: decrypted,
+            passwordHash: decrypted ? null : row.password_hash,
+            banUntilMs: row.ban_until_ms !== null ? Number(row.ban_until_ms) : null,
+            banReason: row.ban_reason,
+            createdAtMs: Number(row.created_at_ms),
+          };
+        });
+
+      const partnerPosts: BackupPartnerPostRecord[] = postRows.map((p) => ({
+        id: Number(p.id),
+        apartmentNo: p.apartment_no,
+        nickname: p.nickname,
+        skillLevel: Number(p.skill_level),
+        sessionFormat: p.session_format,
+        dateStr: p.date_str,
+        startHour: Number(p.start_hour),
+        endHour: Number(p.end_hour),
+        note: p.note,
+        status: p.status,
+        createdAtMs: Number(p.created_at_ms),
+      }));
+
+      const partnerReplies: BackupPartnerReplyRecord[] = replyRows.map((r) => ({
+        id: Number(r.id),
+        postId: Number(r.post_id),
+        apartmentNo: r.apartment_no,
+        nickname: r.nickname,
+        message: r.message,
+        createdAtMs: Number(r.created_at_ms),
+      }));
+
+      const backup: SystemBackupPayload = {
+        version: 1,
+        app: 'soyaksiestatenis',
+        exportedAtMs: clock.nowMs,
+        exportedAtLabel: clock.label,
+        sourceDatabase: isPostgres ? 'postgres' : 'sqlite',
+        data: {
+          apartments,
+          reservations: resRows.map(mapReservationRow),
+          penalties: penRows.map(mapPenaltyRow),
+          partnerPosts,
+          partnerReplies,
+        },
+      };
+
+      res.json(backup);
+    } catch (err) {
+      console.error('Admin backup export error:', err);
+      res.status(500).json({ error: 'Sistem yedeği oluşturulamadı.' });
+    }
+  });
+
+  // Full system JSON backup restore (Admin only — transactional)
+  app.post('/api/admin/restore', requireAuth('admin'), async (req, res) => {
+    try {
+      const body = req.body as Partial<SystemBackupPayload> | undefined;
+      if (!body || body.version !== 1 || !body.data || typeof body.data !== 'object') {
+        res.status(400).json({ error: 'Geçersiz yedek dosyası formatı.' });
+        return;
+      }
+
+      const rawData = body.data as Record<string, unknown>;
+      const rawApts = Array.isArray(rawData.apartments) ? rawData.apartments : null;
+      const rawRes = Array.isArray(rawData.reservations) ? rawData.reservations : [];
+      const rawPen = Array.isArray(rawData.penalties) ? rawData.penalties : [];
+      const rawPosts = Array.isArray(rawData.partnerPosts) ? rawData.partnerPosts : [];
+      const rawReplies = Array.isArray(rawData.partnerReplies) ? rawData.partnerReplies : [];
+
+      if (!rawApts || rawApts.length > 5000 || rawRes.length > 50000 || rawPen.length > 50000) {
+        res.status(400).json({ error: 'Yedek dosyası içeriği geçersiz veya sınırları aşıyor.' });
+        return;
+      }
+
+      const aptRegex = /^[A-Za-z0-9ğüşıöçĞÜŞİÖÇ./\-\s]+$/;
+      const cleanApts: {
+        apartmentNo: string;
+        residentLabel: string;
+        passwordHash: string | null;
+        passwordEncrypted: string | null;
+        banUntilMs: number | null;
+        banReason: string | null;
+        createdAtMs: number;
+      }[] = [];
+      const aptSet = new Set<string>();
+
+      for (const item of rawApts) {
+        if (!item || typeof item !== 'object') {
+          res.status(400).json({ error: 'Yedek dosyasında bozuk daire kaydı var.' });
+          return;
+        }
+        const rec = item as Partial<BackupApartmentRecord>;
+        const apartmentNo = typeof rec.apartmentNo === 'string' ? rec.apartmentNo.trim() : '';
+        if (!apartmentNo || apartmentNo.length > 24 || !aptRegex.test(apartmentNo) || aptSet.has(apartmentNo)) {
+          res.status(400).json({ error: `Geçersiz veya mükerrer daire numarası: ${apartmentNo || '?'}` });
+          return;
+        }
+        aptSet.add(apartmentNo);
+        const residentLabel =
+          typeof rec.residentLabel === 'string' && rec.residentLabel.trim()
+            ? rec.residentLabel.trim().slice(0, 64)
+            : `Daire ${apartmentNo}`;
+        const passcode =
+          typeof rec.passcode === 'string' && rec.passcode.trim().length >= 4 && rec.passcode.trim().length <= 64
+            ? rec.passcode.trim()
+            : null;
+        const fallbackHash =
+          !passcode && typeof rec.passwordHash === 'string' && /^[a-f0-9]+:[a-f0-9]+$/i.test(rec.passwordHash)
+            ? rec.passwordHash
+            : null;
+
+        cleanApts.push({
+          apartmentNo,
+          residentLabel,
+          passwordHash: passcode ? hashPasscode(passcode) : fallbackHash,
+          passwordEncrypted: passcode ? encryptPasscodeForAdmin(passcode) : null,
+          banUntilMs:
+            typeof rec.banUntilMs === 'number' && Number.isFinite(rec.banUntilMs) ? rec.banUntilMs : null,
+          banReason: typeof rec.banReason === 'string' ? rec.banReason.slice(0, 300) : null,
+          createdAtMs:
+            typeof rec.createdAtMs === 'number' && Number.isFinite(rec.createdAtMs)
+              ? rec.createdAtMs
+              : Date.now(),
+        });
+      }
+
+      const cleanRes: ReservationItem[] = [];
+      const resIdSet = new Set<number>();
+      for (const item of rawRes) {
+        if (!item || typeof item !== 'object') continue;
+        const r = item as Partial<ReservationItem>;
+        const id = Number(r.id);
+        const apartmentNo = typeof r.apartmentNo === 'string' ? r.apartmentNo.trim() : '';
+        const dateStr = typeof r.dateStr === 'string' ? r.dateStr.trim() : '';
+        const hour = Number(r.hour);
+        if (
+          !Number.isInteger(id) ||
+          id <= 0 ||
+          resIdSet.has(id) ||
+          !aptSet.has(apartmentNo) ||
+          !isValidDateStr(dateStr) ||
+          !Number.isInteger(hour) ||
+          hour < COURT_OPEN_HOUR ||
+          hour >= COURT_CLOSE_HOUR ||
+          (r.playType !== 'match' && r.playType !== 'solo_training') ||
+          (r.status !== 'active' && r.status !== 'cancelled_ontime' && r.status !== 'cancelled_late')
+        ) {
+          res.status(400).json({ error: 'Yedek dosyasında geçersiz rezervasyon kaydı tespit edildi.' });
+          return;
+        }
+        resIdSet.add(id);
+        const bounds = getSlotBoundsMs(dateStr, hour);
+        cleanRes.push({
+          id,
+          apartmentNo,
+          dateStr,
+          hour,
+          startMs: typeof r.startMs === 'number' && Number.isFinite(r.startMs) ? r.startMs : bounds.startMs,
+          endMs: typeof r.endMs === 'number' && Number.isFinite(r.endMs) ? r.endMs : bounds.endMs,
+          playType: r.playType,
+          status: r.status,
+          createdAtMs:
+            typeof r.createdAtMs === 'number' && Number.isFinite(r.createdAtMs)
+              ? r.createdAtMs
+              : Date.now(),
+          cancelledAtMs:
+            typeof r.cancelledAtMs === 'number' && Number.isFinite(r.cancelledAtMs)
+              ? r.cancelledAtMs
+              : null,
+          lateCancel: Boolean(r.lateCancel),
+        });
+      }
+
+      const cleanPen: PenaltyItem[] = [];
+      const penIdSet = new Set<number>();
+      for (const item of rawPen) {
+        if (!item || typeof item !== 'object') continue;
+        const p = item as Partial<PenaltyItem>;
+        const id = Number(p.id);
+        const apartmentNo = typeof p.apartmentNo === 'string' ? p.apartmentNo.trim() : '';
+        if (
+          !Number.isInteger(id) ||
+          id <= 0 ||
+          penIdSet.has(id) ||
+          !aptSet.has(apartmentNo) ||
+          (p.type !== 'late_cancellation' && p.type !== 'non_resident_violation') ||
+          (p.action !== 'warning' && p.action !== 'ban_7d' && p.action !== 'ban_30d')
+        ) {
+          res.status(400).json({ error: 'Yedek dosyasında geçersiz ihlal/ceza kaydı tespit edildi.' });
+          return;
+        }
+        penIdSet.add(id);
+        const linkedResId =
+          p.reservationId !== null && p.reservationId !== undefined && resIdSet.has(Number(p.reservationId))
+            ? Number(p.reservationId)
+            : null;
+        cleanPen.push({
+          id,
+          apartmentNo,
+          type: p.type,
+          action: p.action,
+          reservationId: linkedResId,
+          note: typeof p.note === 'string' ? p.note.slice(0, 500) : '',
+          feeAmount: typeof p.feeAmount === 'string' ? p.feeAmount.slice(0, 120) : null,
+          createdAtMs:
+            typeof p.createdAtMs === 'number' && Number.isFinite(p.createdAtMs)
+              ? p.createdAtMs
+              : Date.now(),
+        });
+      }
+
+      const cleanPosts: BackupPartnerPostRecord[] = [];
+      const postIdSet = new Set<number>();
+      for (const item of rawPosts) {
+        if (!item || typeof item !== 'object') continue;
+        const p = item as Partial<BackupPartnerPostRecord>;
+        const id = Number(p.id);
+        const apartmentNo = typeof p.apartmentNo === 'string' ? p.apartmentNo.trim() : '';
+        if (
+          !Number.isInteger(id) ||
+          id <= 0 ||
+          postIdSet.has(id) ||
+          !aptSet.has(apartmentNo) ||
+          typeof p.nickname !== 'string' ||
+          !isValidDateStr(typeof p.dateStr === 'string' ? p.dateStr : '') ||
+          (p.sessionFormat !== 'match' && p.sessionFormat !== 'training' && p.sessionFormat !== 'rally') ||
+          (p.status !== 'open' && p.status !== 'matched' && p.status !== 'closed')
+        ) {
+          continue;
+        }
+        postIdSet.add(id);
+        cleanPosts.push({
+          id,
+          apartmentNo,
+          nickname: p.nickname.trim().slice(0, 24) || 'Oyuncu',
+          skillLevel: Math.min(7, Math.max(1, Number(p.skillLevel) || 3)),
+          sessionFormat: p.sessionFormat,
+          dateStr: p.dateStr!,
+          startHour: Math.min(22, Math.max(7, Number(p.startHour) || 18)),
+          endHour: Math.min(23, Math.max(8, Number(p.endHour) || 20)),
+          note: typeof p.note === 'string' ? p.note.slice(0, 240) : null,
+          status: p.status,
+          createdAtMs:
+            typeof p.createdAtMs === 'number' && Number.isFinite(p.createdAtMs)
+              ? p.createdAtMs
+              : Date.now(),
+        });
+      }
+
+      const cleanReplies: BackupPartnerReplyRecord[] = [];
+      const replyIdSet = new Set<number>();
+      for (const item of rawReplies) {
+        if (!item || typeof item !== 'object') continue;
+        const r = item as Partial<BackupPartnerReplyRecord>;
+        const id = Number(r.id);
+        const postId = Number(r.postId);
+        const apartmentNo = typeof r.apartmentNo === 'string' ? r.apartmentNo.trim() : '';
+        if (
+          !Number.isInteger(id) ||
+          id <= 0 ||
+          replyIdSet.has(id) ||
+          !postIdSet.has(postId) ||
+          !aptSet.has(apartmentNo) ||
+          typeof r.nickname !== 'string' ||
+          typeof r.message !== 'string'
+        ) {
+          continue;
+        }
+        replyIdSet.add(id);
+        cleanReplies.push({
+          id,
+          postId,
+          apartmentNo,
+          nickname: r.nickname.trim().slice(0, 24) || 'Oyuncu',
+          message: r.message.trim().slice(0, 300),
+          createdAtMs:
+            typeof r.createdAtMs === 'number' && Number.isFinite(r.createdAtMs)
+              ? r.createdAtMs
+              : Date.now(),
+        });
+      }
+
+      await withTransaction(async (tx) => {
+        await tx.execute('DELETE FROM partner_replies');
+        await tx.execute('DELETE FROM partner_posts');
+        await tx.execute('DELETE FROM penalties');
+        await tx.execute('DELETE FROM reservations');
+        await tx.execute('DELETE FROM apartments');
+
+        for (const a of cleanApts) {
+          await tx.execute(
+            `INSERT INTO apartments (apartment_no, resident_label, password_hash, password_encrypted, ban_until_ms, ban_reason, created_at_ms)
+             VALUES (?, ?, ?, ?, ?, ?, ?)`,
+            [
+              a.apartmentNo,
+              a.residentLabel,
+              a.passwordHash,
+              a.passwordEncrypted,
+              a.banUntilMs,
+              a.banReason,
+              a.createdAtMs,
+            ]
+          );
+        }
+
+        for (const r of cleanRes) {
+          await tx.execute(
+            `INSERT INTO reservations (id, apartment_no, date_str, hour, start_ms, end_ms, play_type, status, created_at_ms, cancelled_at_ms, late_cancel)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            [
+              r.id,
+              r.apartmentNo,
+              r.dateStr,
+              r.hour,
+              r.startMs,
+              r.endMs,
+              r.playType,
+              r.status,
+              r.createdAtMs,
+              r.cancelledAtMs,
+              r.lateCancel ? 1 : 0,
+            ]
+          );
+        }
+
+        for (const p of cleanPen) {
+          await tx.execute(
+            `INSERT INTO penalties (id, apartment_no, type, action, reservation_id, note, fee_amount, created_at_ms)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+            [
+              p.id,
+              p.apartmentNo,
+              p.type,
+              p.action,
+              p.reservationId,
+              p.note,
+              p.feeAmount,
+              p.createdAtMs,
+            ]
+          );
+        }
+
+        for (const post of cleanPosts) {
+          await tx.execute(
+            `INSERT INTO partner_posts (id, apartment_no, nickname, skill_level, session_format, date_str, start_hour, end_hour, note, status, created_at_ms)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            [
+              post.id,
+              post.apartmentNo,
+              post.nickname,
+              post.skillLevel,
+              post.sessionFormat,
+              post.dateStr,
+              post.startHour,
+              post.endHour,
+              post.note,
+              post.status,
+              post.createdAtMs,
+            ]
+          );
+        }
+
+        for (const reply of cleanReplies) {
+          await tx.execute(
+            `INSERT INTO partner_replies (id, post_id, apartment_no, nickname, message, created_at_ms)
+             VALUES (?, ?, ?, ?, ?, ?)`,
+            [
+              reply.id,
+              reply.postId,
+              reply.apartmentNo,
+              reply.nickname,
+              reply.message,
+              reply.createdAtMs,
+            ]
+          );
+        }
+
+        if (isPostgres) {
+          for (const tbl of ['reservations', 'penalties', 'partner_posts', 'partner_replies']) {
+            await tx.execute(
+              `SELECT setval(pg_get_serial_sequence('${tbl}', 'id'), COALESCE((SELECT MAX(id) FROM ${tbl}), 1), (SELECT COUNT(*) > 0 FROM ${tbl}))`
+            );
+          }
+        }
+      });
+
+      broadcastEvent({ type: 'directory:changed' });
+      broadcastEvent({ type: 'partner:changed' });
+
+      res.json({
+        ok: true,
+        counts: {
+          apartments: cleanApts.length,
+          reservations: cleanRes.length,
+          penalties: cleanPen.length,
+          partnerPosts: cleanPosts.length,
+          partnerReplies: cleanReplies.length,
+        },
+      });
+    } catch (err) {
+      if (isUniqueConstraintError(err)) {
+        res.status(400).json({ error: 'Yedek dosyasında çakışan aktif saat dilimi bulunuyor.' });
+        return;
+      }
+      console.error('Admin restore error:', err);
+      res.status(500).json({ error: 'Yedek geri yüklenirken hata oluştu.' });
     }
   });
 
@@ -1675,6 +2140,22 @@ async function startServer() {
   const port = Number(process.env.PORT) || 3000;
   httpServer.listen(port, '0.0.0.0', () => {
     console.log(`Tennis court reservation server listening on http://0.0.0.0:${port}`);
+
+    if (isProd && process.env.DISABLE_KEEP_ALIVE !== 'true') {
+      const externalBase = (process.env.KEEP_ALIVE_URL || process.env.RENDER_EXTERNAL_URL || '')
+        .trim()
+        .replace(/\/$/, '');
+      if (externalBase.startsWith('https://') || externalBase.startsWith('http://')) {
+        const keepAliveTimer = setInterval(() => {
+          fetch(`${externalBase}/api/ping`, {
+            method: 'GET',
+            headers: { 'User-Agent': 'SoyakSiestaKeepAlive/1.0' },
+            signal: AbortSignal.timeout(8000),
+          }).catch(() => {});
+        }, 13 * 60 * 1000);
+        keepAliveTimer.unref?.();
+      }
+    }
   });
 }
 

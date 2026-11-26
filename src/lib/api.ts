@@ -10,6 +10,7 @@ import type {
   ReservationItem,
   ResidentPortalResponse,
   ScheduleResponse,
+  SystemBackupPayload,
   WeatherResponse,
 } from '../shared/types';
 import { KARSIYAKA_OPEN_METEO_URL, parseOpenMeteoPayload } from '../shared/weather';
@@ -154,6 +155,28 @@ export const api = {
 
   getAdminOverview: (token: string) =>
     apiFetch<AdminOverviewResponse>('/api/admin/overview', {}, token),
+
+  getAdminBackup: (token: string) =>
+    apiFetch<SystemBackupPayload>('/api/admin/backup', {}, token),
+
+  restoreAdminBackup: (token: string, backup: SystemBackupPayload) =>
+    apiFetch<{
+      ok: boolean;
+      counts: {
+        apartments: number;
+        reservations: number;
+        penalties: number;
+        partnerPosts: number;
+        partnerReplies: number;
+      };
+    }>(
+      '/api/admin/restore',
+      {
+        method: 'POST',
+        body: JSON.stringify(backup),
+      },
+      token
+    ),
 
   adminAddApartment: (
     token: string,

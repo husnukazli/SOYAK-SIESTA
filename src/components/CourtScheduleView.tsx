@@ -247,9 +247,9 @@ export function CourtScheduleView({
             </div>
           </div>
 
-          {/* Row 2: Compact Single-Row Hourly Strip (07:00 - 23:00 for Selected Weather Day) */}
+          {/* Row 2: Readable Single-Row Hourly Strip (07:00 - 23:00 for Selected Weather Day) */}
           {activeHourlyCourt.length > 0 && (
-            <div className="flex items-stretch gap-1.5 overflow-x-auto pt-1.5 border-t border-slate-100">
+            <div className="flex items-stretch gap-2 overflow-x-auto pt-2 border-t border-slate-100 pb-0.5">
               {activeHourlyCourt.map((h) => {
                 const isCurrentHour = weatherDay === 'today' && h.hour === nowHour;
                 const isPastHour = weatherDay === 'today' && h.hour < nowHour;
@@ -257,17 +257,17 @@ export function CourtScheduleView({
                 return (
                   <div
                     key={`${weatherDay}-${h.hour}`}
-                    className={`min-w-[56px] px-1.5 py-1 rounded-lg border text-center shrink-0 flex flex-col items-center justify-center gap-0.5 ${
+                    className={`min-w-[68px] sm:min-w-[74px] px-2.5 py-2 rounded-xl border text-center shrink-0 flex flex-col items-center justify-center gap-1 ${
                       isCurrentHour
-                        ? 'bg-emerald-50 border-emerald-600 text-slate-900'
+                        ? 'bg-emerald-50 border-emerald-600 shadow-[0_2px_0_0_#10b981] text-slate-900'
                         : rainy
-                        ? 'bg-sky-50/80 border-sky-200 text-slate-900'
-                        : 'bg-slate-50 border-slate-200/80 text-slate-800'
+                        ? 'bg-sky-50/90 border-sky-300 text-slate-900'
+                        : 'bg-slate-50 border-slate-200 text-slate-800'
                     } ${isPastHour ? 'opacity-50' : ''}`}
                   >
                     <span
-                      className={`font-mono text-[10px] font-semibold leading-none tabular-nums ${
-                        isCurrentHour ? 'text-emerald-800 font-bold' : 'text-slate-500'
+                      className={`font-mono text-xs font-semibold leading-none tabular-nums ${
+                        isCurrentHour ? 'text-emerald-800 font-bold' : 'text-slate-600'
                       }`}
                     >
                       {pad2(h.hour)}:00
@@ -275,15 +275,17 @@ export function CourtScheduleView({
                     <div className="flex items-center gap-1 leading-none">
                       <WeatherGlyph
                         code={h.weatherCode}
-                        className={`w-3.5 h-3.5 ${rainy ? 'text-sky-700' : 'text-amber-600'}`}
+                        className={`w-4 h-4 sm:w-[18px] sm:h-[18px] ${
+                          rainy ? 'text-sky-700' : 'text-amber-600'
+                        }`}
                       />
-                      <span className="font-mono text-xs font-bold text-slate-900 tabular-nums">
+                      <span className="font-mono text-sm sm:text-[15px] font-bold text-slate-900 tabular-nums">
                         {h.tempC}°
                       </span>
                     </div>
                     <span
-                      className={`font-mono text-[9px] leading-none tabular-nums ${
-                        rainy ? 'text-sky-800 font-bold' : 'text-slate-500'
+                      className={`font-mono text-[11px] leading-none tabular-nums ${
+                        rainy ? 'text-sky-800 font-bold' : 'text-slate-600 font-medium'
                       }`}
                     >
                       %{h.precipProb}
@@ -564,16 +566,16 @@ export function CourtScheduleView({
                 (canBook || canResidentClickGuest);
 
               const cardClasses = isOwn
-                ? 'bg-emerald-50 border-2 border-emerald-600 text-slate-900'
+                ? 'bg-emerald-50 border-2 border-emerald-600 shadow-[0_3px_0_0_#059669] hover:shadow-[0_4px_0_0_#047857] active:translate-y-[1px] active:shadow-[0_1px_0_0_#047857] text-slate-900'
                 : slot.reservation
-                ? 'bg-rose-50/90 border border-rose-200 text-slate-900'
+                ? 'bg-rose-50/95 border-[1.5px] border-rose-300 shadow-[0_3px_0_0_#fda4af] text-slate-900'
                 : slot.isPast
-                ? 'bg-slate-100/80 border-slate-200 text-slate-400'
+                ? 'bg-slate-100/85 border border-slate-300/80 shadow-[0_2px_0_0_#cbd5e1] text-slate-400'
                 : isOpenPrime
-                ? 'bg-cyan-50/90 border-cyan-300 hover:border-cyan-600 active:scale-[0.98] text-slate-900'
+                ? 'bg-cyan-50/95 border-[1.5px] border-cyan-400 shadow-[0_3px_0_0_#22d3ee] hover:border-cyan-600 hover:shadow-[0_4px_0_0_#0891b2] active:translate-y-[1px] active:shadow-[0_1px_0_0_#0891b2] text-slate-900'
                 : canBook || canResidentClickGuest
-                ? 'bg-white border-slate-200 hover:border-emerald-600 active:scale-[0.98] text-slate-900'
-                : 'bg-amber-50/60 border-amber-200 text-slate-700';
+                ? 'bg-white border-[1.5px] border-slate-300 shadow-[0_3px_0_0_#cbd5e1] hover:border-emerald-600 hover:shadow-[0_4px_0_0_#10b981] active:translate-y-[1px] active:shadow-[0_1px_0_0_#10b981] text-slate-900'
+                : 'bg-amber-50/75 border-[1.5px] border-amber-300 shadow-[0_3px_0_0_#fcd34d] text-slate-700';
 
               const iconBoxClasses = isOwn
                 ? 'bg-emerald-700 text-white'
@@ -603,13 +605,13 @@ export function CourtScheduleView({
                         }
                       : undefined
                   }
-                  className={`rounded-2xl border p-3.5 sm:p-4 min-h-[144px] flex flex-col justify-between gap-2.5 transition-all ${cardClasses} ${
+                  className={`rounded-2xl p-3.5 sm:p-4 min-h-[146px] flex flex-col justify-between gap-2.5 transition-all ${cardClasses} ${
                     isInteractive
                       ? 'cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-700'
                       : ''
                   }`}
                 >
-                  {/* Top Row: Boxy Status Icon + Weather / Prime / Current marker */}
+                  {/* Top Row: Boxy Status Icon + Larger Weather / Current marker */}
                   <div className="flex items-start justify-between gap-2">
                     <div
                       className={`w-10 h-10 rounded-xl flex items-center justify-center shrink-0 ${iconBoxClasses}`}
@@ -627,23 +629,25 @@ export function CourtScheduleView({
                       )}
                     </div>
 
-                    <div className="text-right space-y-0.5">
+                    <div className="text-right space-y-0.5 shrink-0">
                       {slotWeather && (
-                        <span className="inline-flex items-center justify-end gap-1 font-mono text-[11px] font-semibold text-slate-700 tabular-nums">
+                        <span className="inline-flex items-center justify-end gap-1 font-mono text-[13px] sm:text-sm font-bold text-slate-800 tabular-nums whitespace-nowrap">
                           <WeatherGlyph
                             code={slotWeather.weatherCode}
-                            className={`w-3.5 h-3.5 ${
+                            className={`w-4 h-4 sm:w-[18px] sm:h-[18px] ${
                               slotWeather.precipProb >= 35 ? 'text-sky-700' : 'text-amber-600'
                             }`}
                           />
                           <span>{slotWeather.tempC}°</span>
                           {slotWeather.precipProb >= 30 && (
-                            <span className="text-sky-800">%{slotWeather.precipProb}</span>
+                            <span className="text-[11px] sm:text-xs font-semibold text-sky-800">
+                              %{slotWeather.precipProb}
+                            </span>
                           )}
                         </span>
                       )}
                       {slot.isCurrent && (
-                        <span className="block text-[10px] font-bold uppercase tracking-wide text-emerald-700">
+                        <span className="block text-[11px] font-bold uppercase tracking-wide text-emerald-700">
                           Şu An
                         </span>
                       )}

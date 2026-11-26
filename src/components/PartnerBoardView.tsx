@@ -87,6 +87,7 @@ export function PartnerBoardView({
   const [replyMessage, setReplyMessage] = useState('');
   const [replySubmitting, setReplySubmitting] = useState(false);
   const [replyError, setReplyError] = useState<string | null>(null);
+  const [confirmDeletePostId, setConfirmDeletePostId] = useState<number | null>(null);
 
   const loadBoard = useCallback(async () => {
     setLoading((prev) => (board === null ? true : prev));
@@ -189,6 +190,7 @@ export function PartnerBoardView({
     if (!session) return;
     try {
       await api.deletePartnerPost(session.token, postId);
+      setConfirmDeletePostId(null);
       await loadBoard();
     } catch (err) {
       setError(err instanceof ApiError ? err.message : 'İlan silinemedi.');
@@ -531,16 +533,34 @@ export function PartnerBoardView({
                           {post.status === 'open' ? 'Partner Bulundu' : 'Tekrar Aç'}
                         </button>
                       )}
-                      {(post.isOwn || session?.role === 'admin') && (
-                        <button
-                          type="button"
-                          onClick={() => handleDeletePost(post.id)}
-                          aria-label="İlanı sil"
-                          className="min-w-[40px] min-h-[40px] flex items-center justify-center text-red-700 bg-red-50 hover:bg-red-100 border border-red-200 rounded-xl cursor-pointer"
-                        >
-                          <Trash2 className="w-4 h-4" />
-                        </button>
-                      )}
+                      {(post.isOwn || session?.role === 'admin') &&
+                        (confirmDeletePostId === post.id ? (
+                          <div className="inline-flex items-center gap-1.5">
+                            <button
+                              type="button"
+                              onClick={() => handleDeletePost(post.id)}
+                              className="min-h-[40px] px-3 text-xs font-semibold text-white bg-red-700 hover:bg-red-800 rounded-xl cursor-pointer"
+                            >
+                              Silmeyi Onayla
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => setConfirmDeletePostId(null)}
+                              className="min-h-[40px] px-2.5 text-xs font-medium text-slate-600 bg-slate-100 hover:bg-slate-200 rounded-xl cursor-pointer"
+                            >
+                              Vazgeç
+                            </button>
+                          </div>
+                        ) : (
+                          <button
+                            type="button"
+                            onClick={() => setConfirmDeletePostId(post.id)}
+                            aria-label="İlanı sil"
+                            className="min-w-[40px] min-h-[40px] flex items-center justify-center text-red-700 bg-red-50 hover:bg-red-100 border border-red-200 rounded-xl cursor-pointer"
+                          >
+                            <Trash2 className="w-4 h-4" />
+                          </button>
+                        ))}
                     </div>
                   </div>
                 </div>

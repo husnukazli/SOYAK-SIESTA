@@ -1,12 +1,17 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   BarChart3,
   Building2,
   CalendarDays,
   Check,
+  ChevronDown,
+  ChevronUp,
   Copy,
+  Database,
+  Download,
   Eye,
   EyeOff,
+  FileText,
   KeyRound,
   Plus,
   RefreshCw,
@@ -14,6 +19,7 @@ import {
   ShieldAlert,
   ShieldCheck,
   Trash2,
+  Upload,
 } from 'lucide-react';
 import {
   addDaysToDateStr,
@@ -23,7 +29,8 @@ import {
   formatIstanbulDateTime,
   getTodayIstanbulDateStr,
 } from '../lib/api';
-import type { AdminOverviewResponse, AuthSession } from '../shared/types';
+import { exportArchiveToPdf } from '../lib/exportPdf';
+import type { AdminOverviewResponse, AuthSession, SystemBackupPayload } from '../shared/types';
 
 interface AdminConsoleViewProps {
   session: AuthSession | null;
@@ -125,6 +132,18 @@ export function AdminConsoleView({
   const [statsRange, setStatsRange] = useState<TimeRangePreset>('all');
   const [statsCustomStart, setStatsCustomStart] = useState('');
   const [statsCustomEnd, setStatsCustomEnd] = useState('');
+
+  // Archive PDF & Full JSON Backup / Restore state
+  const [backupMenuOpen, setBackupMenuOpen] = useState(false);
+  const [confirmCancelResId, setConfirmCancelResId] = useState<number | null>(null);
+  const [exportingPdf, setExportingPdf] = useState(false);
+  const [exportingJson, setExportingJson] = useState(false);
+  const [restoringJson, setRestoringJson] = useState(false);
+  const [pendingRestore, setPendingRestore] = useState<{
+    fileName: string;
+    payload: SystemBackupPayload;
+  } | null>(null);
+  const restoreInputRef = useRef<HTMLInputElement | null>(null);
 
   const fetchOverview = useCallback(async () => {
     if (!session || session.role !== 'admin') return;
@@ -536,6 +555,7 @@ export function AdminConsoleView({
     setActionSuccess(null);
     try {
       await api.adminCancelReservation(session.token, resId);
+      setConfirmCancelResId(null);
       setActionSuccess('Rezervasyon yönetici tarafından iptal edildi.');
       await fetchOverview();
     } catch (err) {
@@ -561,6 +581,96 @@ export function AdminConsoleView({
       setTimeout(() => setCopiedAll(false), 2000);
     } catch {
       // Clipboard may be blocked
+    }
+  };
+
+  const handleDownloadJsonBackup = async () => {
+    setActionError(null);
+    setActionSuccess(null);
+    setExportingJson(true);
+    try {
+      const backup = await api.getAdminBackup(session.token);
+      const blob = new Blob([JSON.stringify(backup, null, 2)], {
+        type: 'application/json;charset=utf-8',
+      });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `soyak-siesta-yedek-${todayStr}.json`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+      setActionSuccess(
+        `Tam sistem yedeği (.json) indirildi (${backup.data.apartments.length} daire, ${backup.data.reservations.length} rezervasyon).`
+      );
+    } catch (err) {
+      setActionError(err instanceof ApiError ? err.message : 'JSON yedeği indirilemedi.');
+    } finally {
+      setExportingJson(false);
+    }
+  };
+
+  const handleDownloadPdfArchive = async () => {
+    setActionError(null);
+    setActionSuccess(null);
+    setExportingPdf(true);
+    try {
+      const backup = await api.getAdminBackup(session.token);
+      exportArchiveToPdf(backup, todayStr);
+      setActionSuccess('Yönetim arşivi PDF olarak indirildi.');
+    } catch (err) {
+      setActionError(err instanceof ApiError ? err.message : 'PDF arşivi oluşturulamadı.');
+    } finally {
+      setExportingPdf(false);
+    }
+  };
+
+  const handleSelectRestoreFile = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    e.target.value = '';
+    if (!file) return;
+    setActionError(null);
+    setActionSuccess(null);
+    try {
+      const text = await file.text();
+      const parsed = JSON.parse(text) as Partial<SystemBackupPayload>;
+      if (
+        !parsed ||
+        parsed.version !== 1 ||
+        !parsed.data ||
+        !Array.isArray(parsed.data.apartments) ||
+        !Array.isArray(parsed.data.reservations)
+      ) {
+        setActionError('Seçilen dosya geçerli bir Soyak Siesta JSON yedek dosyası değil.');
+        return;
+      }
+      setPendingRestore({
+        fileName: file.name,
+        payload: parsed as SystemBackupPayload,
+      });
+    } catch {
+      setActionError('JSON yedek dosyası okunamadı.');
+    }
+  };
+
+  const handleConfirmRestore = async () => {
+    if (!pendingRestore) return;
+    setActionError(null);
+    setActionSuccess(null);
+    setRestoringJson(true);
+    try {
+      const res = await api.restoreAdminBackup(session.token, pendingRestore.payload);
+      setPendingRestore(null);
+      setActionSuccess(
+        `Yedek geri yüklendi: ${res.counts.apartments} daire, ${res.counts.reservations} rezervasyon, ${res.counts.penalties} yaptırım, ${res.counts.partnerPosts} oyun arkadaşı ilanı.`
+      );
+      onRefreshAuthStatus();
+      await fetchOverview();
+    } catch (err) {
+      setActionError(err instanceof ApiError ? err.message : 'Yedek geri yüklenemedi.');
+    } finally {
+      setRestoringJson(false);
     }
   };
 
@@ -1167,9 +1277,9 @@ export function AdminConsoleView({
                                     <button
                                       type="button"
                                       onClick={() => handleDeleteApartment(apt.apartmentNo)}
-                                      className="px-2.5 py-1.5 text-[11px] font-semibold text-white bg-red-700 rounded-lg cursor-pointer"
+                                      className="px-2.5 py-1.5 text-[11px] font-semibold text-white bg-red-700 hover:bg-red-800 rounded-lg cursor-pointer"
                                     >
-                                      Sil
+                                      Silmeyi Onayla
                                     </button>
                                     <button
                                       type="button"
@@ -1288,15 +1398,33 @@ export function AdminConsoleView({
                         </span>
                       </p>
                     </div>
-                    {r.status === 'active' && (
-                      <button
-                        type="button"
-                        onClick={() => handleAdminCancelRes(r.id)}
-                        className="min-h-[40px] px-3 text-xs font-semibold text-red-700 bg-red-50 border border-red-200 rounded-xl shrink-0 cursor-pointer"
-                      >
-                        İptal Et
-                      </button>
-                    )}
+                    {r.status === 'active' &&
+                      (confirmCancelResId === r.id ? (
+                        <div className="inline-flex items-center gap-1.5 shrink-0">
+                          <button
+                            type="button"
+                            onClick={() => handleAdminCancelRes(r.id)}
+                            className="min-h-[40px] px-3 text-xs font-semibold text-white bg-red-700 hover:bg-red-800 rounded-xl cursor-pointer"
+                          >
+                            İptali Onayla
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => setConfirmCancelResId(null)}
+                            className="min-h-[40px] px-2.5 text-xs font-medium text-slate-600 bg-slate-100 rounded-xl cursor-pointer"
+                          >
+                            Vazgeç
+                          </button>
+                        </div>
+                      ) : (
+                        <button
+                          type="button"
+                          onClick={() => setConfirmCancelResId(r.id)}
+                          className="min-h-[40px] px-3 text-xs font-semibold text-red-700 bg-red-50 border border-red-200 rounded-xl shrink-0 cursor-pointer"
+                        >
+                          İptal Et
+                        </button>
+                      ))}
                   </div>
                 ))}
               </div>
@@ -1339,15 +1467,33 @@ export function AdminConsoleView({
                           )}
                         </td>
                         <td className="px-5 py-3 text-right">
-                          {r.status === 'active' && (
-                            <button
-                              type="button"
-                              onClick={() => handleAdminCancelRes(r.id)}
-                              className="px-2.5 py-1.5 text-[11px] font-medium text-red-700 bg-red-50 hover:bg-red-100 border border-red-200 rounded-lg cursor-pointer"
-                            >
-                              İptal Et
-                            </button>
-                          )}
+                          {r.status === 'active' &&
+                            (confirmCancelResId === r.id ? (
+                              <div className="inline-flex items-center gap-1.5">
+                                <button
+                                  type="button"
+                                  onClick={() => handleAdminCancelRes(r.id)}
+                                  className="px-2.5 py-1.5 text-[11px] font-semibold text-white bg-red-700 hover:bg-red-800 rounded-lg cursor-pointer"
+                                >
+                                  İptali Onayla
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => setConfirmCancelResId(null)}
+                                  className="px-2 py-1.5 text-[11px] text-slate-500 hover:text-slate-900 cursor-pointer"
+                                >
+                                  Vazgeç
+                                </button>
+                              </div>
+                            ) : (
+                              <button
+                                type="button"
+                                onClick={() => setConfirmCancelResId(r.id)}
+                                className="px-2.5 py-1.5 text-[11px] font-medium text-red-700 bg-red-50 hover:bg-red-100 border border-red-200 rounded-lg cursor-pointer"
+                              >
+                                İptal Et
+                              </button>
+                            ))}
                         </td>
                       </tr>
                     ))}
@@ -1801,6 +1947,146 @@ export function AdminConsoleView({
           </div>
         </div>
       )}
+
+      {/* Collapsible Bottom Menu: Database Status, PDF Archive & JSON Backup/Restore */}
+      <section className="bg-white border border-slate-200 rounded-2xl overflow-hidden">
+        <button
+          type="button"
+          onClick={() => setBackupMenuOpen((prev) => !prev)}
+          aria-expanded={backupMenuOpen}
+          className="w-full min-h-[52px] px-4 sm:px-5 py-3.5 flex items-center justify-between gap-3 text-left hover:bg-slate-50 transition-colors cursor-pointer"
+        >
+          <div className="flex items-center gap-3 min-w-0">
+            <div
+              className={`w-9 h-9 rounded-xl flex items-center justify-center shrink-0 ${
+                overview?.databaseMode === 'postgres'
+                  ? 'bg-emerald-100 text-emerald-800'
+                  : 'bg-amber-100 text-amber-800'
+              }`}
+            >
+              <Database className="w-4 h-4" aria-hidden="true" />
+            </div>
+            <div className="min-w-0">
+              <p className="font-display text-xs sm:text-sm font-bold text-slate-900 truncate">
+                Arşiv (PDF) ve Sistem Yedeği (JSON)
+              </p>
+              <p className="text-[11px] text-slate-500 truncate">
+                {overview?.databaseMode === 'postgres'
+                  ? 'Veritabanı: Kalıcı PostgreSQL · Yedekleme ve arşiv araçları'
+                  : 'Veritabanı: Geçici Yerel Depolama (SQLite) · Detaylar ve yedekleme için açın'}
+              </p>
+            </div>
+          </div>
+
+          <span className="inline-flex items-center gap-1 text-xs font-semibold text-slate-600 shrink-0">
+            <span>{backupMenuOpen ? 'Gizle' : 'Aç'}</span>
+            {backupMenuOpen ? (
+              <ChevronUp className="w-4 h-4" aria-hidden="true" />
+            ) : (
+              <ChevronDown className="w-4 h-4" aria-hidden="true" />
+            )}
+          </span>
+        </button>
+
+        {backupMenuOpen && (
+          <div className="px-4 sm:px-5 pb-4 sm:pb-5 pt-3 border-t border-slate-200 bg-slate-50/60 space-y-4">
+            <div className="p-3.5 bg-white border border-slate-200 rounded-xl space-y-1">
+              <p className="text-xs sm:text-sm font-bold text-slate-900">
+                {overview?.databaseMode === 'postgres'
+                  ? 'Kalıcı Veritabanı (PostgreSQL) Aktif'
+                  : 'Geçici Yerel Depolama (SQLite) Aktif'}
+              </p>
+              <p className="text-xs text-slate-600 leading-relaxed">
+                {overview?.databaseMode === 'postgres'
+                  ? 'Daireler, şifreler ve rezervasyonlar harici PostgreSQL veritabanında tutulur; güncellemelerde korunur. Yine de düzenli yedek alabilirsiniz.'
+                  : 'Sunucuda harici DATABASE_URL bağlı olmadığı için güncellemelerde veriler sıfırlanabilir. Render Environment ayarlarına PostgreSQL DATABASE_URL bağlayın veya aşağıdan JSON yedek alın.'}
+              </p>
+            </div>
+
+            <div className="flex flex-wrap items-center gap-2">
+              <button
+                type="button"
+                onClick={handleDownloadPdfArchive}
+                disabled={exportingPdf}
+                className="min-h-[42px] inline-flex items-center gap-1.5 px-4 py-2 text-xs font-semibold text-white bg-slate-900 hover:bg-slate-800 disabled:opacity-50 rounded-xl whitespace-nowrap cursor-pointer"
+              >
+                <FileText className="w-4 h-4" aria-hidden="true" />
+                <span>{exportingPdf ? 'Hazırlanıyor...' : 'Arşivi PDF İndir'}</span>
+              </button>
+
+              <button
+                type="button"
+                onClick={handleDownloadJsonBackup}
+                disabled={exportingJson}
+                className="min-h-[42px] inline-flex items-center gap-1.5 px-4 py-2 text-xs font-semibold text-emerald-900 bg-emerald-50 hover:bg-emerald-100 border border-emerald-300 disabled:opacity-50 rounded-xl whitespace-nowrap cursor-pointer"
+              >
+                <Download className="w-4 h-4" aria-hidden="true" />
+                <span>{exportingJson ? 'İndiriliyor...' : 'Yedek JSON İndir'}</span>
+              </button>
+
+              <input
+                ref={restoreInputRef}
+                type="file"
+                accept=".json,application/json"
+                onChange={handleSelectRestoreFile}
+                className="hidden"
+              />
+              <button
+                type="button"
+                onClick={() => restoreInputRef.current?.click()}
+                disabled={restoringJson}
+                className="min-h-[42px] inline-flex items-center gap-1.5 px-4 py-2 text-xs font-semibold text-slate-700 bg-white hover:bg-slate-100 border border-slate-300 disabled:opacity-50 rounded-xl whitespace-nowrap cursor-pointer"
+              >
+                <Upload className="w-4 h-4" aria-hidden="true" />
+                <span>JSON Yedekten Yükle</span>
+              </button>
+            </div>
+
+            {pendingRestore && (
+              <div className="p-3.5 bg-amber-50 border border-amber-300 rounded-xl flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                <div className="text-xs text-amber-950 space-y-0.5">
+                  <p className="font-bold">
+                    Geri Yükleme Onayı: <span className="font-mono">{pendingRestore.fileName}</span>
+                  </p>
+                  <p>
+                    Bu işlem mevcut verilerin yerine yedekteki{' '}
+                    <strong className="font-mono">
+                      {pendingRestore.payload.data.apartments.length}
+                    </strong>{' '}
+                    daire,{' '}
+                    <strong className="font-mono">
+                      {pendingRestore.payload.data.reservations.length}
+                    </strong>{' '}
+                    rezervasyon ve{' '}
+                    <strong className="font-mono">
+                      {(pendingRestore.payload.data.penalties ?? []).length}
+                    </strong>{' '}
+                    yaptırım kaydını yükleyecektir.
+                  </p>
+                </div>
+                <div className="flex items-center gap-2 shrink-0">
+                  <button
+                    type="button"
+                    onClick={handleConfirmRestore}
+                    disabled={restoringJson}
+                    className="min-h-[40px] px-4 py-2 text-xs font-semibold text-white bg-amber-700 hover:bg-amber-800 disabled:opacity-50 rounded-xl cursor-pointer"
+                  >
+                    {restoringJson ? 'Yükleniyor...' : 'Onayla ve Geri Yükle'}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setPendingRestore(null)}
+                    disabled={restoringJson}
+                    className="min-h-[40px] px-3 py-2 text-xs font-medium text-slate-700 bg-white border border-slate-300 rounded-xl cursor-pointer"
+                  >
+                    Vazgeç
+                  </button>
+                </div>
+              </div>
+            )}
+          </div>
+        )}
+      </section>
     </div>
   );
 }
