@@ -10,6 +10,17 @@ export type PartnerFormat = 'match' | 'training' | 'rally';
 
 export type PartnerPostStatus = 'open' | 'matched' | 'closed';
 
+export type ClosureReasonType = 'maintenance' | 'event' | 'other';
+
+export interface CourtClosureItem {
+  id: number;
+  dateStr: string;
+  hour: number;
+  reasonType: ClosureReasonType;
+  reasonText: string;
+  createdAtMs: number;
+}
+
 export interface AuthSession {
   role: 'resident' | 'admin';
   apartmentNo?: string;
@@ -76,6 +87,11 @@ export interface ScheduleSlot {
     isOwn: boolean;
     createdAtMs: number;
   } | null;
+  closure: {
+    id: number;
+    reasonType: ClosureReasonType;
+    reasonText: string;
+  } | null;
   eligibility: SlotEligibility | null;
 }
 
@@ -92,6 +108,10 @@ export interface ScheduleResponse {
     reservedBy: string | null;
     playType: PlayType | null;
     walkInAvailable: boolean;
+    closure: {
+      reasonType: ClosureReasonType;
+      reasonText: string;
+    } | null;
   };
   slots: ScheduleSlot[];
   residentSummary: ApartmentSummary | null;
@@ -108,6 +128,7 @@ export interface AdminOverviewResponse {
   apartments: ApartmentSummary[];
   reservations: ReservationItem[];
   penalties: PenaltyItem[];
+  closures: CourtClosureItem[];
   nowMs: number;
   todayStr: string;
   databaseMode?: 'postgres' | 'sqlite';
@@ -158,6 +179,7 @@ export interface SystemBackupPayload {
     penalties: PenaltyItem[];
     partnerPosts: BackupPartnerPostRecord[];
     partnerReplies: BackupPartnerReplyRecord[];
+    courtClosures?: CourtClosureItem[];
   };
 }
 
@@ -214,6 +236,10 @@ export type RealtimeEvent =
     }
   | {
       type: 'partner:changed';
+    }
+  | {
+      type: 'closure:changed';
+      dateStr?: string;
     };
 
 export interface WeatherHourlySlot {

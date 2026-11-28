@@ -21,11 +21,13 @@ import {
   initDatabase,
   isAdminSetupNeeded,
   isPostgres,
+  mapCourtClosureRow,
   mapPartnerPostRow,
   mapPartnerReplyRow,
   mapPenaltyRow,
   mapReservationRow,
   parseCookies,
+  type RawCourtClosureRow,
   type RawPartnerPostRow,
   type RawPartnerReplyRow,
   type RawPenaltyRow,
@@ -63,6 +65,8 @@ import type {
   BackupApartmentRecord,
   BackupPartnerPostRecord,
   BackupPartnerReplyRecord,
+  ClosureReasonType,
+  CourtClosureItem,
   PartnerBoardResponse,
   PartnerFormat,
   PartnerPostStatus,
@@ -495,15 +499,27 @@ async function startServer() {
         ? await getApartmentRuleContext(viewerAptNo, dateStr, clock.nowMs)
         : null;
 
-      const dayReservations = await db.queryAll<RawReservationRow>(
-        "SELECT * FROM reservations WHERE date_str = ? AND status = 'active'",
-        [dateStr]
-      );
+      const [dayReservations, dayClosures] = await Promise.all([
+        db.queryAll<RawReservationRow>(
+          "SELECT * FROM reservations WHERE date_str = ? AND status = 'active'",
+          [dateStr]
+        ),
+        db.queryAll<RawCourtClosureRow>(
+          'SELECT * FROM court_closures WHERE date_str = ? ORDER BY hour ASC',
+          [dateStr]
+        ),
+      ]);
 
       const byHour = new Map<number, ReturnType<typeof mapReservationRow>>();
       for (const row of dayReservations) {
         const mapped = mapReservationRow(row);
         byHour.set(mapped.hour, mapped);
+      }
+
+      const closureByHour = new Map<number, CourtClosureItem>();
+      for (const row of dayClosures) {
+        const mapped = mapCourtClosureRow(row);
+        closureByHour.set(mapped.hour, mapped);
       }
 
       const todayRows =
@@ -514,12 +530,22 @@ async function startServer() {
               [clock.dateStr]
             );
       const currentSlotRow = todayRows.find((r) => Number(r.hour) === clock.hour);
+      const currentClosureRow =
+        dateStr === clock.dateStr
+          ? closureByHour.get(clock.hour) || null
+          : await db
+              .queryOne<RawCourtClosureRow>(
+                'SELECT * FROM court_closures WHERE date_str = ? AND hour = ?',
+                [clock.dateStr, clock.hour]
+              )
+              .then((r) => (r ? mapCourtClosureRow(r) : null));
       const isOperational = clock.hour >= COURT_OPEN_HOUR && clock.hour < COURT_CLOSE_HOUR;
 
       const slots: ScheduleSlot[] = [];
       for (let h = COURT_OPEN_HOUR; h < COURT_CLOSE_HOUR; h++) {
         const { startMs, endMs } = getSlotBoundsMs(dateStr, h);
         const resItem = byHour.get(h) || null;
+        const slotClosure = closureByHour.get(h) || null;
         const isPast = endMs <= clock.nowMs + 5 * 60 * 1000;
         const isCurrent = dateStr === clock.dateStr && h === clock.hour;
 
@@ -529,6 +555,9 @@ async function startServer() {
               targetDateStr: dateStr,
               hour: h,
               slotReserved: Boolean(resItem),
+              closure: slotClosure
+                ? { reasonType: slotClosure.reasonType, reasonText: slotClosure.reasonText }
+                : null,
               apt: aptContext,
             })
           : null;
@@ -550,6 +579,13 @@ async function startServer() {
                 createdAtMs: resItem.createdAtMs,
               }
             : null,
+          closure: slotClosure
+            ? {
+                id: slotClosure.id,
+                reasonType: slotClosure.reasonType,
+                reasonText: slotClosure.reasonText,
+              }
+            : null,
           eligibility,
         });
       }
@@ -568,7 +604,13 @@ async function startServer() {
           isOperational,
           reservedBy: currentSlotRow ? currentSlotRow.apartment_no : null,
           playType: currentSlotRow ? currentSlotRow.play_type : null,
-          walkInAvailable: isOperational && !currentSlotRow,
+          walkInAvailable: isOperational && !currentSlotRow && !currentClosureRow,
+          closure: currentClosureRow
+            ? {
+                reasonType: currentClosureRow.reasonType,
+                reasonText: currentClosureRow.reasonText,
+              }
+            : null,
         },
         slots,
         residentSummary: aptContext ? aptContext.summary : null,
@@ -650,16 +692,27 @@ async function startServer() {
           throw { status: 404, message: 'Daire kaydı bulunamadı.' };
         }
 
-        const existingSlot = await tx.queryOne<{ id: number | string }>(
-          "SELECT id FROM reservations WHERE date_str = ? AND hour = ? AND status = 'active'",
-          [dateStr, hour]
-        );
+        const [existingSlot, closureRow] = await Promise.all([
+          tx.queryOne<{ id: number | string }>(
+            "SELECT id FROM reservations WHERE date_str = ? AND hour = ? AND status = 'active'",
+            [dateStr, hour]
+          ),
+          tx.queryOne<RawCourtClosureRow>(
+            'SELECT * FROM court_closures WHERE date_str = ? AND hour = ?',
+            [dateStr, hour]
+          ),
+        ]);
+
+        const slotClosure = closureRow ? mapCourtClosureRow(closureRow) : null;
 
         const eligibility = evaluateSlotEligibility({
           clock,
           targetDateStr: dateStr,
           hour,
           slotReserved: Boolean(existingSlot),
+          closure: slotClosure
+            ? { reasonType: slotClosure.reasonType, reasonText: slotClosure.reasonText }
+            : null,
           apt: aptCtx,
           playType,
         });
@@ -860,16 +913,20 @@ async function startServer() {
   app.get('/api/admin/overview', requireAuth('admin'), async (_req, res) => {
     try {
       const clock = getClockNow();
-      const [apartments, reservationRows, penaltyRows] = await Promise.all([
+      const [apartments, reservationRows, penaltyRows, closureRows] = await Promise.all([
         getAllApartmentSummaries(clock.nowMs, { includePasscodes: true }),
         db.queryAll<RawReservationRow>('SELECT * FROM reservations ORDER BY start_ms DESC LIMIT 1500'),
         db.queryAll<RawPenaltyRow>('SELECT * FROM penalties ORDER BY created_at_ms DESC LIMIT 1500'),
+        db.queryAll<RawCourtClosureRow>(
+          'SELECT * FROM court_closures ORDER BY date_str DESC, hour ASC LIMIT 1000'
+        ),
       ]);
 
       const payload: AdminOverviewResponse = {
         apartments,
         reservations: reservationRows.map(mapReservationRow),
         penalties: penaltyRows.map(mapPenaltyRow),
+        closures: closureRows.map(mapCourtClosureRow),
         nowMs: clock.nowMs,
         todayStr: clock.dateStr,
         databaseMode: isPostgres ? 'postgres' : 'sqlite',
@@ -885,7 +942,7 @@ async function startServer() {
   app.get('/api/admin/backup', requireAuth('admin'), async (_req, res) => {
     try {
       const clock = getClockNow();
-      const [aptRows, resRows, penRows, postRows, replyRows] = await Promise.all([
+      const [aptRows, resRows, penRows, postRows, replyRows, closureRows] = await Promise.all([
         db.queryAll<{
           apartment_no: string;
           resident_label: string;
@@ -901,6 +958,7 @@ async function startServer() {
         db.queryAll<RawPenaltyRow>('SELECT * FROM penalties ORDER BY id ASC'),
         db.queryAll<RawPartnerPostRow>('SELECT * FROM partner_posts ORDER BY id ASC'),
         db.queryAll<RawPartnerReplyRow>('SELECT * FROM partner_replies ORDER BY id ASC'),
+        db.queryAll<RawCourtClosureRow>('SELECT * FROM court_closures ORDER BY id ASC'),
       ]);
 
       const apartments: BackupApartmentRecord[] = aptRows
@@ -953,6 +1011,7 @@ async function startServer() {
           penalties: penRows.map(mapPenaltyRow),
           partnerPosts,
           partnerReplies,
+          courtClosures: closureRows.map(mapCourtClosureRow),
         },
       };
 
@@ -978,6 +1037,7 @@ async function startServer() {
       const rawPen = Array.isArray(rawData.penalties) ? rawData.penalties : [];
       const rawPosts = Array.isArray(rawData.partnerPosts) ? rawData.partnerPosts : [];
       const rawReplies = Array.isArray(rawData.partnerReplies) ? rawData.partnerReplies : [];
+      const rawClosures = Array.isArray(rawData.courtClosures) ? rawData.courtClosures : [];
 
       if (!rawApts || rawApts.length > 5000 || rawRes.length > 50000 || rawPen.length > 50000) {
         res.status(400).json({ error: 'Yedek dosyası içeriği geçersiz veya sınırları aşıyor.' });
@@ -1192,7 +1252,51 @@ async function startServer() {
         });
       }
 
+      const cleanClosures: CourtClosureItem[] = [];
+      const closureKeySet = new Set<string>();
+      const closureIdSet = new Set<number>();
+      for (const item of rawClosures) {
+        if (!item || typeof item !== 'object') continue;
+        const c = item as Partial<CourtClosureItem>;
+        const id = Number(c.id);
+        const dateStr = typeof c.dateStr === 'string' ? c.dateStr.trim() : '';
+        const hour = Number(c.hour);
+        const reasonType: ClosureReasonType =
+          c.reasonType === 'maintenance' || c.reasonType === 'event' || c.reasonType === 'other'
+            ? c.reasonType
+            : 'other';
+        const reasonText = typeof c.reasonText === 'string' ? c.reasonText.trim().slice(0, 240) : '';
+        const key = `${dateStr}:${hour}`;
+        if (
+          !Number.isInteger(id) ||
+          id <= 0 ||
+          closureIdSet.has(id) ||
+          !isValidDateStr(dateStr) ||
+          !Number.isInteger(hour) ||
+          hour < COURT_OPEN_HOUR ||
+          hour >= COURT_CLOSE_HOUR ||
+          !reasonText ||
+          closureKeySet.has(key)
+        ) {
+          continue;
+        }
+        closureIdSet.add(id);
+        closureKeySet.add(key);
+        cleanClosures.push({
+          id,
+          dateStr,
+          hour,
+          reasonType,
+          reasonText,
+          createdAtMs:
+            typeof c.createdAtMs === 'number' && Number.isFinite(c.createdAtMs)
+              ? c.createdAtMs
+              : Date.now(),
+        });
+      }
+
       await withTransaction(async (tx) => {
+        await tx.execute('DELETE FROM court_closures');
         await tx.execute('DELETE FROM partner_replies');
         await tx.execute('DELETE FROM partner_posts');
         await tx.execute('DELETE FROM penalties');
@@ -1287,8 +1391,22 @@ async function startServer() {
           );
         }
 
+        for (const c of cleanClosures) {
+          await tx.execute(
+            `INSERT INTO court_closures (id, date_str, hour, reason_type, reason_text, created_at_ms)
+             VALUES (?, ?, ?, ?, ?, ?)`,
+            [c.id, c.dateStr, c.hour, c.reasonType, c.reasonText, c.createdAtMs]
+          );
+        }
+
         if (isPostgres) {
-          for (const tbl of ['reservations', 'penalties', 'partner_posts', 'partner_replies']) {
+          for (const tbl of [
+            'reservations',
+            'penalties',
+            'partner_posts',
+            'partner_replies',
+            'court_closures',
+          ]) {
             await tx.execute(
               `SELECT setval(pg_get_serial_sequence('${tbl}', 'id'), COALESCE((SELECT MAX(id) FROM ${tbl}), 1), (SELECT COUNT(*) > 0 FROM ${tbl}))`
             );
@@ -1298,6 +1416,7 @@ async function startServer() {
 
       broadcastEvent({ type: 'directory:changed' });
       broadcastEvent({ type: 'partner:changed' });
+      broadcastEvent({ type: 'closure:changed' });
 
       res.json({
         ok: true,
@@ -1307,6 +1426,7 @@ async function startServer() {
           penalties: cleanPen.length,
           partnerPosts: cleanPosts.length,
           partnerReplies: cleanReplies.length,
+          courtClosures: cleanClosures.length,
         },
       });
     } catch (err) {
@@ -1623,6 +1743,189 @@ async function startServer() {
     } catch (err) {
       console.error('Admin cancel error:', err);
       res.status(500).json({ error: 'Rezervasyon iptal edilirken hata oluştu.' });
+    }
+  });
+
+  // Close court hours for event/maintenance with mandatory justification (Admin only)
+  app.post('/api/admin/closures', requireAuth('admin'), async (req, res) => {
+    try {
+      const dateStr = typeof req.body?.dateStr === 'string' ? req.body.dateStr.trim() : '';
+      const startHour = Number(req.body?.startHour);
+      const endHour = Number(req.body?.endHour);
+      const reasonTypeRaw = req.body?.reasonType;
+      const reasonType: ClosureReasonType | null =
+        reasonTypeRaw === 'maintenance' || reasonTypeRaw === 'event' || reasonTypeRaw === 'other'
+          ? reasonTypeRaw
+          : null;
+      const reasonText =
+        typeof req.body?.reasonText === 'string' ? req.body.reasonText.trim() : '';
+      const cancelExisting = req.body?.cancelExisting === true;
+
+      const clock = getClockNow();
+      if (!isValidDateStr(dateStr)) {
+        res.status(400).json({ error: 'Geçersiz tarih formatı.' });
+        return;
+      }
+      if (dateStr < clock.dateStr) {
+        res.status(400).json({ error: 'Geçmiş tarihler için kort kapatma kaydı oluşturulamaz.' });
+        return;
+      }
+      if (
+        !Number.isInteger(startHour) ||
+        !Number.isInteger(endHour) ||
+        startHour < COURT_OPEN_HOUR ||
+        endHour > COURT_CLOSE_HOUR ||
+        startHour >= endHour
+      ) {
+        res.status(400).json({ error: 'Geçerli bir saat aralığı seçin (07:00 - 23:00).' });
+        return;
+      }
+      if (!reasonType) {
+        res.status(400).json({ error: 'Geçerli bir kapatma nedeni türü seçin.' });
+        return;
+      }
+      if (reasonText.length < 3 || reasonText.length > 240) {
+        res.status(400).json({
+          error: 'Kort kapatma gerekçesi en az 3, en fazla 240 karakter olmalıdır.',
+        });
+        return;
+      }
+
+      const hours: number[] = [];
+      for (let h = startHour; h < endHour; h++) {
+        hours.push(h);
+      }
+
+      const outcome = await withTransaction(async (tx) => {
+        const placeholders = hours.map(() => '?').join(',');
+        const conflicts = await tx.queryAll<RawReservationRow>(
+          `SELECT * FROM reservations WHERE date_str = ? AND status = 'active' AND hour IN (${placeholders}) ORDER BY hour ASC`,
+          [dateStr, ...hours]
+        );
+
+        if (conflicts.length > 0 && !cancelExisting) {
+          const summary = conflicts
+            .map((c) => `${pad2(Number(c.hour))}:00 (Daire ${c.apartment_no})`)
+            .join(', ');
+          throw {
+            status: 409,
+            message: `Seçilen saat aralığında aktif rezervasyonlar bulunuyor: ${summary}. Kapatmak için "Çakışan aktif rezervasyonları cezasız iptal et" seçeneğini işaretleyin.`,
+          };
+        }
+
+        const cancelledList: { id: number; hour: number; apartmentNo: string }[] = [];
+        if (conflicts.length > 0 && cancelExisting) {
+          for (const c of conflicts) {
+            const cId = Number(c.id);
+            await tx.execute(
+              "UPDATE reservations SET status = 'cancelled_ontime', cancelled_at_ms = ?, late_cancel = 0 WHERE id = ? AND status = 'active'",
+              [clock.nowMs, cId]
+            );
+            cancelledList.push({
+              id: cId,
+              hour: Number(c.hour),
+              apartmentNo: c.apartment_no,
+            });
+          }
+        }
+
+        for (const h of hours) {
+          if (isPostgres) {
+            await tx.execute(
+              `INSERT INTO court_closures (date_str, hour, reason_type, reason_text, created_at_ms)
+               VALUES (?, ?, ?, ?, ?)
+               ON CONFLICT (date_str, hour) DO UPDATE
+               SET reason_type = EXCLUDED.reason_type,
+                   reason_text = EXCLUDED.reason_text,
+                   created_at_ms = EXCLUDED.created_at_ms`,
+              [dateStr, h, reasonType, reasonText, clock.nowMs]
+            );
+          } else {
+            await tx.execute(
+              `INSERT INTO court_closures (date_str, hour, reason_type, reason_text, created_at_ms)
+               VALUES (?, ?, ?, ?, ?)
+               ON CONFLICT(date_str, hour) DO UPDATE
+               SET reason_type = excluded.reason_type,
+                   reason_text = excluded.reason_text,
+                   created_at_ms = excluded.created_at_ms`,
+              [dateStr, h, reasonType, reasonText, clock.nowMs]
+            );
+          }
+        }
+
+        return {
+          closedHours: hours,
+          cancelledCount: cancelledList.length,
+          cancelledList,
+        };
+      });
+
+      for (const c of outcome.cancelledList) {
+        broadcastEvent({
+          type: 'schedule:changed',
+          action: 'cancelled',
+          dateStr,
+          hour: c.hour,
+          apartmentNo: c.apartmentNo,
+          reservationId: c.id,
+        });
+      }
+      broadcastEvent({ type: 'closure:changed', dateStr });
+
+      res.status(201).json({
+        closedHours: outcome.closedHours,
+        cancelledCount: outcome.cancelledCount,
+      });
+    } catch (err: unknown) {
+      if (err && typeof err === 'object' && 'status' in err && 'message' in err) {
+        const typed = err as { status: number; message: string };
+        res.status(typed.status).json({ error: typed.message });
+        return;
+      }
+      console.error('Create court closure error:', err);
+      res.status(500).json({ error: 'Kort kapatma kaydı oluşturulurken hata oluştu.' });
+    }
+  });
+
+  // Reopen all closed hours on a given date (Admin only)
+  app.delete('/api/admin/closures/by-date/:dateStr', requireAuth('admin'), async (req, res) => {
+    try {
+      const dateStr = typeof req.params.dateStr === 'string' ? req.params.dateStr.trim() : '';
+      if (!isValidDateStr(dateStr)) {
+        res.status(400).json({ error: 'Geçersiz tarih formatı.' });
+        return;
+      }
+      const info = await db.execute('DELETE FROM court_closures WHERE date_str = ?', [dateStr]);
+      broadcastEvent({ type: 'closure:changed', dateStr });
+      res.json({ deletedCount: info.changes });
+    } catch (err) {
+      console.error('Delete court closures by date error:', err);
+      res.status(500).json({ error: 'Kort kapatma kayıtları kaldırılırken hata oluştu.' });
+    }
+  });
+
+  // Reopen a single closed hour by closure ID (Admin only)
+  app.delete('/api/admin/closures/:id', requireAuth('admin'), async (req, res) => {
+    try {
+      const closureId = Number(req.params.id);
+      if (!Number.isInteger(closureId) || closureId <= 0) {
+        res.status(400).json({ error: 'Geçersiz kapatma kaydı numarası.' });
+        return;
+      }
+      const existing = await db.queryOne<{ date_str: string }>(
+        'SELECT date_str FROM court_closures WHERE id = ?',
+        [closureId]
+      );
+      if (!existing) {
+        res.status(404).json({ error: 'Kapatma kaydı bulunamadı.' });
+        return;
+      }
+      await db.execute('DELETE FROM court_closures WHERE id = ?', [closureId]);
+      broadcastEvent({ type: 'closure:changed', dateStr: existing.date_str });
+      res.json({ ok: true });
+    } catch (err) {
+      console.error('Delete court closure error:', err);
+      res.status(500).json({ error: 'Kort kapatma kaydı kaldırılırken hata oluştu.' });
     }
   });
 

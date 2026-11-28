@@ -1,6 +1,7 @@
 import type {
   AdminOverviewResponse,
   AuthSession,
+  ClosureReasonType,
   PartnerBoardResponse,
   PartnerFormat,
   PartnerPostItem,
@@ -170,6 +171,7 @@ export const api = {
         penalties: number;
         partnerPosts: number;
         partnerReplies: number;
+        courtClosures?: number;
       };
     }>(
       '/api/admin/restore',
@@ -258,6 +260,40 @@ export const api = {
     apiFetch<{ ok: boolean }>(
       `/api/admin/reservations/${reservationId}/cancel`,
       { method: 'POST' },
+      token
+    ),
+
+  adminCreateClosures: (
+    token: string,
+    payload: {
+      dateStr: string;
+      startHour: number;
+      endHour: number;
+      reasonType: ClosureReasonType;
+      reasonText: string;
+      cancelExisting?: boolean;
+    }
+  ) =>
+    apiFetch<{ closedHours: number[]; cancelledCount: number }>(
+      '/api/admin/closures',
+      {
+        method: 'POST',
+        body: JSON.stringify(payload),
+      },
+      token
+    ),
+
+  adminDeleteClosure: (token: string, closureId: number) =>
+    apiFetch<{ ok: boolean }>(
+      `/api/admin/closures/${closureId}`,
+      { method: 'DELETE' },
+      token
+    ),
+
+  adminDeleteClosuresByDate: (token: string, dateStr: string) =>
+    apiFetch<{ deletedCount: number }>(
+      `/api/admin/closures/by-date/${encodeURIComponent(dateStr)}`,
+      { method: 'DELETE' },
       token
     ),
 

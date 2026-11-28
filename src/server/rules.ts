@@ -1,4 +1,4 @@
-import type { PlayType, SlotEligibility } from '../shared/types.ts';
+import type { ClosureReasonType, PlayType, SlotEligibility } from '../shared/types.ts';
 import { FREE_CANCEL_HOURS, LATE_BOOKING_FREE_CANCEL_HOURS } from '../shared/cancelPolicy.ts';
 
 export { FREE_CANCEL_HOURS, LATE_BOOKING_FREE_CANCEL_HOURS };
@@ -86,15 +86,22 @@ export interface ApartmentRuleContext {
   hasAdjacentDayPrimeBooking: boolean;
 }
 
+export function formatClosurePrefix(reasonType: ClosureReasonType): string {
+  if (reasonType === 'maintenance') return 'Bakım nedeniyle kapalı';
+  if (reasonType === 'event') return 'Etkinlik nedeniyle kapalı';
+  return 'Yönetim tarafından kapalı';
+}
+
 export function evaluateSlotEligibility(params: {
   clock: IstanbulClock;
   targetDateStr: string;
   hour: number;
   slotReserved: boolean;
+  closure?: { reasonType: ClosureReasonType; reasonText: string } | null;
   apt: ApartmentRuleContext;
   playType?: PlayType;
 }): SlotEligibility {
-  const { clock, targetDateStr, hour, slotReserved, apt, playType } = params;
+  const { clock, targetDateStr, hour, slotReserved, closure, apt, playType } = params;
   const primeTime = isPrimeHour(hour);
   const soloTrainingAllowed = !primeTime;
   const { endMs } = getSlotBoundsMs(targetDateStr, hour);
@@ -116,6 +123,16 @@ export function evaluateSlotEligibility(params: {
     return {
       bookable: false,
       reason: `Rezervasyonlar en fazla ${MAX_BOOKING_DAYS_AHEAD + 1} günlük takvim için açılır.`,
+      primeTime,
+      primeOverrideUsed: false,
+      soloTrainingAllowed,
+    };
+  }
+
+  if (closure) {
+    return {
+      bookable: false,
+      reason: `${formatClosurePrefix(closure.reasonType)}: ${closure.reasonText}`,
       primeTime,
       primeOverrideUsed: false,
       soloTrainingAllowed,

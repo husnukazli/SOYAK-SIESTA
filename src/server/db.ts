@@ -6,6 +6,8 @@ import { Pool } from 'pg';
 import type {
   ApartmentSummary,
   AuthSession,
+  ClosureReasonType,
+  CourtClosureItem,
   PartnerFormat,
   PartnerPostItem,
   PartnerPostStatus,
@@ -257,6 +259,18 @@ export async function initDatabase(): Promise<void> {
 
       CREATE INDEX IF NOT EXISTS idx_partner_replies_post_created
         ON partner_replies(post_id, created_at_ms ASC);
+
+      CREATE TABLE IF NOT EXISTS court_closures (
+        id SERIAL PRIMARY KEY,
+        date_str TEXT NOT NULL,
+        hour INTEGER NOT NULL,
+        reason_type TEXT NOT NULL CHECK(reason_type IN ('maintenance', 'event', 'other')),
+        reason_text TEXT NOT NULL,
+        created_at_ms BIGINT NOT NULL
+      );
+
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_court_closures_date_hour
+        ON court_closures(date_str, hour);
     `);
   } else {
     if (!sqliteDb) {
@@ -350,6 +364,18 @@ export async function initDatabase(): Promise<void> {
 
       CREATE INDEX IF NOT EXISTS idx_partner_replies_post_created
         ON partner_replies(post_id, created_at_ms ASC);
+
+      CREATE TABLE IF NOT EXISTS court_closures (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        date_str TEXT NOT NULL,
+        hour INTEGER NOT NULL,
+        reason_type TEXT NOT NULL CHECK(reason_type IN ('maintenance', 'event', 'other')),
+        reason_text TEXT NOT NULL,
+        created_at_ms INTEGER NOT NULL
+      );
+
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_court_closures_date_hour
+        ON court_closures(date_str, hour);
     `);
 
     const cols = conn.prepare('PRAGMA table_info(apartments)').all() as { name: string }[];
@@ -636,6 +662,26 @@ export function mapPenaltyRow(row: RawPenaltyRow): PenaltyItem {
     reservationId: row.reservation_id !== null ? Number(row.reservation_id) : null,
     note: row.note,
     feeAmount: row.fee_amount,
+    createdAtMs: Number(row.created_at_ms),
+  };
+}
+
+export interface RawCourtClosureRow {
+  id: number | string;
+  date_str: string;
+  hour: number | string;
+  reason_type: ClosureReasonType;
+  reason_text: string;
+  created_at_ms: number | string;
+}
+
+export function mapCourtClosureRow(row: RawCourtClosureRow): CourtClosureItem {
+  return {
+    id: Number(row.id),
+    dateStr: row.date_str,
+    hour: Number(row.hour),
+    reasonType: row.reason_type,
+    reasonText: row.reason_text,
     createdAtMs: Number(row.created_at_ms),
   };
 }

@@ -20,6 +20,7 @@ import {
   Sun,
   UserCheck,
   Wind,
+  Wrench,
   XCircle,
 } from 'lucide-react';
 import {
@@ -304,14 +305,22 @@ export function CourtScheduleView({
           <div className="flex items-start gap-3.5">
             <div
               className={`w-12 h-12 rounded-2xl flex items-center justify-center shrink-0 border ${
-                courtStatus?.walkInAvailable
+                courtStatus?.closure
+                  ? 'bg-slate-800 text-white border-slate-800'
+                  : courtStatus?.walkInAvailable
                   ? 'bg-emerald-700 text-white border-emerald-700'
                   : courtStatus?.reservedBy
                   ? 'bg-rose-700 text-white border-rose-700'
                   : 'bg-slate-100 text-slate-600 border-slate-200'
               }`}
             >
-              {courtStatus?.walkInAvailable ? (
+              {courtStatus?.closure ? (
+                courtStatus.closure.reasonType === 'maintenance' ? (
+                  <Wrench className="w-6 h-6" aria-hidden="true" />
+                ) : (
+                  <Lock className="w-6 h-6" aria-hidden="true" />
+                )
+              ) : courtStatus?.walkInAvailable ? (
                 <CalendarCheck className="w-6 h-6" aria-hidden="true" />
               ) : courtStatus?.reservedBy ? (
                 <UserCheck className="w-6 h-6" aria-hidden="true" />
@@ -332,7 +341,13 @@ export function CourtScheduleView({
               <h1 className="font-display text-lg sm:text-2xl font-bold tracking-tight text-slate-900 text-balance leading-snug">
                 {courtStatus
                   ? courtStatus.isOperational
-                    ? courtStatus.walkInAvailable
+                    ? courtStatus.closure
+                      ? courtStatus.closure.reasonType === 'maintenance'
+                        ? 'Kort bakım nedeniyle kapalı'
+                        : courtStatus.closure.reasonType === 'event'
+                        ? 'Kort etkinlik nedeniyle kapalı'
+                        : 'Kort şu an kapalı'
+                      : courtStatus.walkInAvailable
                       ? 'Kort şu an müsait'
                       : `Kort şu an Daire ${courtStatus.reservedBy} kullanımında`
                     : 'Kort kullanım saatleri dışında'
@@ -340,7 +355,9 @@ export function CourtScheduleView({
               </h1>
 
               <p className="text-xs sm:text-sm text-slate-600 leading-relaxed">
-                {courtStatus?.walkInAvailable
+                {courtStatus?.closure
+                  ? `${courtStatus.currentHourLabel} dilimi · ${courtStatus.closure.reasonText}`
+                  : courtStatus?.walkInAvailable
                   ? 'Rezervasyonsuz kullanıma açık; ancak online rezervasyon yapıldığında öncelik rezerve eden daireye geçer.'
                   : courtStatus?.reservedBy
                   ? `${courtStatus.currentHourLabel} dilimi · ${
@@ -467,6 +484,10 @@ export function CourtScheduleView({
               <span className="w-3 h-3 rounded bg-emerald-100 border border-emerald-600 inline-block" />
               Sizin Kaydınız
             </span>
+            <span className="inline-flex items-center gap-1.5">
+              <span className="w-3 h-3 rounded bg-slate-200 border border-slate-400 inline-block" />
+              Bakım / Etkinlik (Kapalı)
+            </span>
           </div>
         </div>
 
@@ -530,21 +551,27 @@ export function CourtScheduleView({
           <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-3">
             {(schedule?.slots ?? []).map((slot) => {
               const isOwn = slot.reservation?.isOwn ?? false;
+              const isClosed = Boolean(slot.closure) && !slot.isPast;
               const canBook =
+                !isClosed &&
                 session?.role === 'resident' &&
                 !slot.reservation &&
                 !slot.isPast &&
                 (slot.eligibility?.bookable ?? false);
               const canResidentClickGuest =
-                !session && !slot.reservation && !slot.isPast;
+                !isClosed && !session && !slot.reservation && !slot.isPast;
               const canCancelOwn = isOwn && slot.startMs > (schedule?.nowMs ?? Date.now());
               const isBlocked =
+                !isClosed &&
                 session?.role === 'resident' &&
                 !slot.reservation &&
                 !slot.isPast &&
                 !canBook;
               const isAdminOpenView =
-                session?.role === 'admin' && !slot.reservation && !slot.isPast;
+                !isClosed &&
+                session?.role === 'admin' &&
+                !slot.reservation &&
+                !slot.isPast;
 
               const isInteractive = canBook || canResidentClickGuest || canCancelOwn;
               const slotWeather = !slot.isPast
@@ -562,6 +589,7 @@ export function CourtScheduleView({
               };
 
               const isOpenPrime =
+                !isClosed &&
                 slot.primeTime &&
                 !slot.isPast &&
                 !slot.reservation &&
@@ -569,6 +597,8 @@ export function CourtScheduleView({
 
               const cardClasses = isOwn
                 ? 'bg-emerald-50 border-2 border-emerald-600 shadow-[0_3px_0_0_#059669] hover:shadow-[0_4px_0_0_#047857] active:translate-y-[1px] active:shadow-[0_1px_0_0_#047857] text-slate-900'
+                : isClosed
+                ? 'bg-slate-200/80 border-[1.5px] border-slate-400 shadow-[0_3px_0_0_#94a3b8] text-slate-900'
                 : slot.reservation
                 ? 'bg-rose-50/95 border-[1.5px] border-rose-300 shadow-[0_3px_0_0_#fda4af] text-slate-900'
                 : slot.isPast
@@ -589,6 +619,8 @@ export function CourtScheduleView({
 
               const iconBoxClasses = isOwn
                 ? 'bg-emerald-700 text-white'
+                : isClosed
+                ? 'bg-slate-700 text-white'
                 : slot.reservation
                 ? 'bg-rose-700 text-white'
                 : slot.isPast
@@ -628,6 +660,12 @@ export function CourtScheduleView({
                     >
                       {isOwn ? (
                         <CalendarCheck className="w-5 h-5" aria-hidden="true" />
+                      ) : isClosed ? (
+                        slot.closure?.reasonType === 'maintenance' ? (
+                          <Wrench className="w-5 h-5" aria-hidden="true" />
+                        ) : (
+                          <Lock className="w-5 h-5" aria-hidden="true" />
+                        )
                       ) : slot.reservation ? (
                         <UserCheck className="w-5 h-5" aria-hidden="true" />
                       ) : slot.isPast ? (
@@ -679,7 +717,7 @@ export function CourtScheduleView({
                     >
                       {formatHourRange(slot.hour)}
                     </p>
-                    {slot.primeTime && !slot.isPast && (
+                    {slot.primeTime && !slot.isPast && !isClosed && (
                       <p
                         className={`text-[11px] font-semibold ${
                           isOwn
@@ -695,7 +733,23 @@ export function CourtScheduleView({
                       </p>
                     )}
 
-                    {slot.reservation ? (
+                    {isClosed ? (
+                      <div className="space-y-0.5">
+                        <p className="text-xs font-bold text-slate-800">
+                          {slot.closure!.reasonType === 'maintenance'
+                            ? 'Bakım · Kapalı'
+                            : slot.closure!.reasonType === 'event'
+                            ? 'Etkinlik · Kapalı'
+                            : 'Yönetim · Kapalı'}
+                        </p>
+                        <p
+                          className="text-xs text-slate-700 leading-snug line-clamp-2"
+                          title={slot.closure!.reasonText}
+                        >
+                          {slot.closure!.reasonText}
+                        </p>
+                      </div>
+                    ) : slot.reservation ? (
                       <div className="space-y-0.5">
                         <p
                           className={`text-xs sm:text-sm font-bold truncate ${
@@ -734,7 +788,9 @@ export function CourtScheduleView({
                   {/* Bottom: Clear Tactile Action Label */}
                   <div
                     className={`pt-1.5 border-t flex items-center justify-between gap-2 text-xs font-semibold ${
-                      slot.reservation && !isOwn
+                      isClosed
+                        ? 'border-slate-300'
+                        : slot.reservation && !isOwn
                         ? 'border-rose-200/80'
                         : isOwn
                         ? 'border-emerald-200'
@@ -743,7 +799,15 @@ export function CourtScheduleView({
                         : 'border-black/5'
                     }`}
                   >
-                    {isOwn ? (
+                    {isClosed ? (
+                      <span className="text-slate-700 font-bold">
+                        {slot.closure!.reasonType === 'maintenance'
+                          ? 'Bakım · Rezervasyona Kapalı'
+                          : slot.closure!.reasonType === 'event'
+                          ? 'Etkinlik · Rezervasyona Kapalı'
+                          : 'Yönetim · Rezervasyona Kapalı'}
+                      </span>
+                    ) : isOwn ? (
                       <>
                         {canCancelOwn ? (
                           <span className="inline-flex items-center gap-1 text-red-700">

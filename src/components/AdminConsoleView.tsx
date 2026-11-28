@@ -13,13 +13,16 @@ import {
   EyeOff,
   FileText,
   KeyRound,
+  Lock,
   Plus,
   RefreshCw,
   Search,
   ShieldAlert,
   ShieldCheck,
   Trash2,
+  Unlock,
   Upload,
+  Wrench,
 } from 'lucide-react';
 import {
   addDaysToDateStr,
@@ -27,10 +30,18 @@ import {
   ApiError,
   formatHourRange,
   formatIstanbulDateTime,
+  formatTurkishDateFull,
   getTodayIstanbulDateStr,
+  pad2,
 } from '../lib/api';
 import { exportArchiveToPdf } from '../lib/exportPdf';
-import type { AdminOverviewResponse, AuthSession, SystemBackupPayload } from '../shared/types';
+import type {
+  AdminOverviewResponse,
+  AuthSession,
+  ClosureReasonType,
+  CourtClosureItem,
+  SystemBackupPayload,
+} from '../shared/types';
 
 interface AdminConsoleViewProps {
   session: AuthSession | null;
@@ -40,7 +51,7 @@ interface AdminConsoleViewProps {
   refreshTrigger?: number;
 }
 
-type AdminSubTab = 'apartments' | 'violations' | 'reservations' | 'stats';
+type AdminSubTab = 'apartments' | 'reservations' | 'closures' | 'violations' | 'stats';
 type TimeRangePreset = 'today' | '7d' | '30d' | 'all' | 'custom';
 
 function getDateRangeBounds(
@@ -134,6 +145,17 @@ export function AdminConsoleView({
   const [statsCustomStart, setStatsCustomStart] = useState('');
   const [statsCustomEnd, setStatsCustomEnd] = useState('');
 
+  // Court closure (Etkinlik / Bakım) state
+  const [closureDate, setClosureDate] = useState('');
+  const [closureStartHour, setClosureStartHour] = useState(9);
+  const [closureEndHour, setClosureEndHour] = useState(12);
+  const [closureReasonType, setClosureReasonType] = useState<ClosureReasonType>('maintenance');
+  const [closureReasonText, setClosureReasonText] = useState('');
+  const [closureCancelExisting, setClosureCancelExisting] = useState(false);
+  const [closureSubmitting, setClosureSubmitting] = useState(false);
+  const [confirmReopenClosureId, setConfirmReopenClosureId] = useState<number | null>(null);
+  const [confirmReopenDateStr, setConfirmReopenDateStr] = useState<string | null>(null);
+
   // Archive PDF & Full JSON Backup / Restore state
   const [backupMenuOpen, setBackupMenuOpen] = useState(false);
   const [confirmCancelResId, setConfirmCancelResId] = useState<number | null>(null);
@@ -177,6 +199,22 @@ export function AdminConsoleView({
 
   const allReservations = overview?.reservations ?? [];
   const allPenalties = overview?.penalties ?? [];
+  const allClosures = overview?.closures ?? [];
+
+  const closuresByDate = useMemo(() => {
+    const groups = new Map<string, CourtClosureItem[]>();
+    for (const c of allClosures) {
+      const list = groups.get(c.dateStr) ?? [];
+      list.push(c);
+      groups.set(c.dateStr, list);
+    }
+    return Array.from(groups.entries())
+      .sort(([a], [b]) => b.localeCompare(a))
+      .map(([dateStr, items]) => ({
+        dateStr,
+        items: [...items].sort((a, b) => a.hour - b.hour),
+      }));
+  }, [allClosures]);
 
   const filteredReservations = useMemo(() => {
     const { startDate, endDate } = getDateRangeBounds(
@@ -581,6 +619,68 @@ export function AdminConsoleView({
     }
   };
 
+  const handleCreateClosures = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setActionError(null);
+    setActionSuccess(null);
+    const targetDate = closureDate || todayStr;
+    if (closureReasonText.trim().length < 3) {
+      setActionError('Lütfen en az 3 karakterlik bir kort kapatma gerekçesi yazın.');
+      return;
+    }
+    setClosureSubmitting(true);
+    try {
+      const res = await api.adminCreateClosures(session.token, {
+        dateStr: targetDate,
+        startHour: closureStartHour,
+        endHour: closureEndHour,
+        reasonType: closureReasonType,
+        reasonText: closureReasonText.trim(),
+        cancelExisting: closureCancelExisting,
+      });
+      setClosureReasonText('');
+      setClosureCancelExisting(false);
+      setActionSuccess(
+        res.cancelledCount > 0
+          ? `${targetDate} tarihinde ${res.closedHours.length} saat dilimi kapatıldı (çakışan ${res.cancelledCount} aktif rezervasyon cezasız iptal edildi).`
+          : `${targetDate} tarihinde ${res.closedHours.length} saat dilimi rezervasyona kapatıldı.`
+      );
+      await fetchOverview();
+    } catch (err) {
+      setActionError(err instanceof ApiError ? err.message : 'Kort kapatma kaydı oluşturulamadı.');
+    } finally {
+      setClosureSubmitting(false);
+    }
+  };
+
+  const handleDeleteClosure = async (closureId: number) => {
+    setActionError(null);
+    setActionSuccess(null);
+    try {
+      await api.adminDeleteClosure(session.token, closureId);
+      setConfirmReopenClosureId(null);
+      setActionSuccess('Saat dilimi yeniden rezervasyona açıldı.');
+      await fetchOverview();
+    } catch (err) {
+      setActionError(err instanceof ApiError ? err.message : 'Kapatma kaydı kaldırılamadı.');
+    }
+  };
+
+  const handleDeleteClosuresByDate = async (dateStr: string) => {
+    setActionError(null);
+    setActionSuccess(null);
+    try {
+      const res = await api.adminDeleteClosuresByDate(session.token, dateStr);
+      setConfirmReopenDateStr(null);
+      setActionSuccess(
+        `${dateStr} tarihindeki ${res.deletedCount} kapalı saat dilimi yeniden açıldı.`
+      );
+      await fetchOverview();
+    } catch (err) {
+      setActionError(err instanceof ApiError ? err.message : 'Tarihe ait kapatma kayıtları kaldırılamadı.');
+    }
+  };
+
   const handleCopySingle = async (apartmentNo: string, passcodeValue: string) => {
     try {
       await navigator.clipboard.writeText(passcodeValue);
@@ -680,8 +780,12 @@ export function AdminConsoleView({
     try {
       const res = await api.restoreAdminBackup(session.token, pendingRestore.payload);
       setPendingRestore(null);
+      const closureSuffix =
+        res.counts.courtClosures && res.counts.courtClosures > 0
+          ? `, ${res.counts.courtClosures} kort kapatma`
+          : '';
       setActionSuccess(
-        `Yedek geri yüklendi: ${res.counts.apartments} daire, ${res.counts.reservations} rezervasyon, ${res.counts.penalties} yaptırım, ${res.counts.partnerPosts} oyun arkadaşı ilanı.`
+        `Yedek geri yüklendi: ${res.counts.apartments} daire, ${res.counts.reservations} rezervasyon, ${res.counts.penalties} yaptırım, ${res.counts.partnerPosts} oyun arkadaşı ilanı${closureSuffix}.`
       );
       onRefreshAuthStatus();
       await fetchOverview();
@@ -761,11 +865,12 @@ export function AdminConsoleView({
         </div>
 
         {/* Android Boxy Sub-Tab Switcher */}
-        <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+        <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-2">
           {(
             [
               { id: 'apartments', label: 'Daireler', Icon: Building2 },
               { id: 'reservations', label: 'Rezervasyonlar', Icon: CalendarDays },
+              { id: 'closures', label: 'Kort Kapatma', Icon: Lock },
               { id: 'violations', label: 'İhlal / İptaller', Icon: ShieldAlert },
               { id: 'stats', label: 'İstatistikler', Icon: BarChart3 },
             ] as const
@@ -1523,6 +1628,303 @@ export function AdminConsoleView({
         </div>
       )}
 
+      {/* Sub-tab 2b: Court Closures (Event / Maintenance) */}
+      {subTab === 'closures' && (
+        <div className="grid grid-cols-1 lg:grid-cols-12 gap-5 items-start">
+          <form
+            onSubmit={handleCreateClosures}
+            className="lg:col-span-5 bg-white border border-slate-200 rounded-2xl p-5 sm:p-6 space-y-4"
+          >
+            <div className="space-y-1">
+              <h2 className="font-display text-base font-bold text-slate-900">
+                Etkinlik / Bakım Nedeniyle Kort Kapat
+              </h2>
+              <p className="text-xs text-slate-600 leading-relaxed">
+                Kullanılamayacak saatleri gerekçe göstererek rezervasyona kapatın. Kapalı saatler tüm sakinlerin takviminde gerekçesiyle birlikte görünür.
+              </p>
+            </div>
+
+            <div className="space-y-1.5">
+              <label htmlFor="closure-date" className="block text-xs font-semibold text-slate-700">
+                Tarih
+              </label>
+              <input
+                id="closure-date"
+                type="date"
+                min={todayStr}
+                value={closureDate || todayStr}
+                onChange={(e) => setClosureDate(e.target.value)}
+                className="w-full h-11 px-3 bg-white border border-slate-300 rounded-xl text-xs font-mono focus:outline-none focus:ring-2 focus:ring-emerald-700"
+                required
+              />
+            </div>
+
+            <div className="space-y-2">
+              <div className="flex items-center justify-between gap-2">
+                <span className="text-xs font-semibold text-slate-700">Saat Aralığı</span>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setClosureStartHour(7);
+                    setClosureEndHour(23);
+                  }}
+                  className="text-[11px] font-semibold text-emerald-800 hover:text-emerald-950 underline cursor-pointer"
+                >
+                  Tüm Günü Seç (07:00 - 23:00)
+                </button>
+              </div>
+              <div className="grid grid-cols-2 gap-3">
+                <div className="space-y-1">
+                  <label htmlFor="closure-start" className="block text-[11px] text-slate-500">
+                    Başlangıç
+                  </label>
+                  <select
+                    id="closure-start"
+                    value={closureStartHour}
+                    onChange={(e) => {
+                      const nextStart = Number(e.target.value);
+                      setClosureStartHour(nextStart);
+                      if (closureEndHour <= nextStart) {
+                        setClosureEndHour(nextStart + 1);
+                      }
+                    }}
+                    className="w-full h-11 px-3 bg-white border border-slate-300 rounded-xl text-xs font-mono"
+                  >
+                    {Array.from({ length: 16 }, (_, i) => 7 + i).map((h) => (
+                      <option key={h} value={h}>
+                        {pad2(h)}:00
+                      </option>
+                    ))}
+                  </select>
+                </div>
+                <div className="space-y-1">
+                  <label htmlFor="closure-end" className="block text-[11px] text-slate-500">
+                    Bitiş
+                  </label>
+                  <select
+                    id="closure-end"
+                    value={closureEndHour}
+                    onChange={(e) => setClosureEndHour(Number(e.target.value))}
+                    className="w-full h-11 px-3 bg-white border border-slate-300 rounded-xl text-xs font-mono"
+                  >
+                    {Array.from({ length: 16 }, (_, i) => 8 + i)
+                      .filter((h) => h > closureStartHour)
+                      .map((h) => (
+                        <option key={h} value={h}>
+                          {pad2(h)}:00
+                        </option>
+                      ))}
+                  </select>
+                </div>
+              </div>
+            </div>
+
+            <div className="space-y-1.5">
+              <span className="block text-xs font-semibold text-slate-700">Kapatma Türü</span>
+              <div className="grid grid-cols-3 gap-2">
+                {(
+                  [
+                    { id: 'maintenance', label: 'Bakım / Onarım' },
+                    { id: 'event', label: 'Etkinlik / Turnuva' },
+                    { id: 'other', label: 'Diğer' },
+                  ] as const
+                ).map((rt) => (
+                  <button
+                    key={rt.id}
+                    type="button"
+                    onClick={() => setClosureReasonType(rt.id)}
+                    className={`min-h-[42px] px-2.5 py-2 rounded-xl border text-xs font-semibold transition-colors cursor-pointer ${
+                      closureReasonType === rt.id
+                        ? 'bg-slate-900 border-slate-900 text-white'
+                        : 'bg-white border-slate-300 text-slate-700 hover:bg-slate-50'
+                    }`}
+                  >
+                    {rt.label}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            <div className="space-y-1.5">
+              <label htmlFor="closure-reason" className="block text-xs font-semibold text-slate-700">
+                Gerekçe (Zorunlu)
+              </label>
+              <textarea
+                id="closure-reason"
+                rows={3}
+                minLength={3}
+                maxLength={240}
+                value={closureReasonText}
+                onChange={(e) => setClosureReasonText(e.target.value)}
+                placeholder="Örn: Zemin yıkama ve çizgi boyama çalışması veya site yaz turnuvası"
+                className="w-full p-3 border border-slate-300 rounded-xl text-xs focus:outline-none focus:ring-2 focus:ring-emerald-700"
+                required
+              />
+            </div>
+
+            <label className="flex items-start gap-2.5 p-3 border border-slate-200 rounded-xl bg-slate-50 cursor-pointer">
+              <input
+                type="checkbox"
+                checked={closureCancelExisting}
+                onChange={(e) => setClosureCancelExisting(e.target.checked)}
+                className="mt-0.5 h-4 w-4 rounded border-slate-300 text-slate-900 focus:ring-slate-900 shrink-0"
+              />
+              <div className="text-xs leading-snug">
+                <span className="block font-semibold text-slate-800">
+                  Çakışan aktif rezervasyonları cezasız iptal ederek kapat
+                </span>
+                <span className="block text-[11px] text-slate-500 mt-0.5">
+                  İşaretlenmezse, seçilen saatlerde aktif daire rezervasyonu varsa kapatma yapılmaz.
+                </span>
+              </div>
+            </label>
+
+            <button
+              type="submit"
+              disabled={closureSubmitting}
+              className="min-h-[48px] w-full py-2.5 text-xs font-semibold text-white bg-slate-900 hover:bg-slate-800 disabled:opacity-50 rounded-xl transition-colors cursor-pointer"
+            >
+              {closureSubmitting
+                ? 'Kaydediliyor...'
+                : `Seçili Saatleri Kapat (${pad2(closureStartHour)}:00 - ${pad2(closureEndHour)}:00)`}
+            </button>
+          </form>
+
+          <div className="lg:col-span-7 bg-white border border-slate-200 rounded-2xl overflow-hidden">
+            <div className="px-5 py-4 border-b border-slate-200 bg-slate-50 flex items-center justify-between gap-3">
+              <div>
+                <h2 className="font-display text-sm font-bold text-slate-900">
+                  Kapalı Saat ve Gün Kayıtları ({allClosures.length})
+                </h2>
+                <p className="text-[11px] text-slate-500 mt-0.5">
+                  İşi erken biten bakım veya etkinlikler için saatleri tek tek ya da gün bazında yeniden açabilirsiniz.
+                </p>
+              </div>
+            </div>
+
+            {closuresByDate.length === 0 ? (
+              <div className="p-8 text-center space-y-2">
+                <div className="w-11 h-11 rounded-2xl bg-slate-100 text-slate-500 flex items-center justify-center mx-auto">
+                  <Wrench className="w-5 h-5" aria-hidden="true" />
+                </div>
+                <p className="text-sm font-bold text-slate-900">Aktif veya kayıtlı kort kapatma yok</p>
+                <p className="text-xs text-slate-500">
+                  Soldaki formdan tarih, saat aralığı ve gerekçe girerek kortu bakım veya etkinliğe kapatabilirsiniz.
+                </p>
+              </div>
+            ) : (
+              <div className="divide-y divide-slate-200">
+                {closuresByDate.map((group) => (
+                  <div key={group.dateStr} className="p-4 sm:px-5 space-y-3">
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <div>
+                        <p className="font-display text-sm font-bold text-slate-900">
+                          {formatTurkishDateFull(group.dateStr)}
+                        </p>
+                        <p className="font-mono text-[11px] text-slate-500">
+                          {group.dateStr} · {group.items.length} saat kapalı
+                        </p>
+                      </div>
+
+                      {confirmReopenDateStr === group.dateStr ? (
+                        <div className="inline-flex items-center gap-1.5">
+                          <button
+                            type="button"
+                            onClick={() => handleDeleteClosuresByDate(group.dateStr)}
+                            className="min-h-[38px] px-3 text-xs font-semibold text-white bg-emerald-700 hover:bg-emerald-800 rounded-xl cursor-pointer"
+                          >
+                            Tüm Günü Açmayı Onayla
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => setConfirmReopenDateStr(null)}
+                            className="min-h-[38px] px-2.5 text-xs font-medium text-slate-600 bg-slate-100 rounded-xl cursor-pointer"
+                          >
+                            Vazgeç
+                          </button>
+                        </div>
+                      ) : (
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setConfirmReopenClosureId(null);
+                            setConfirmReopenDateStr(group.dateStr);
+                          }}
+                          className="min-h-[38px] inline-flex items-center gap-1.5 px-3 text-xs font-semibold text-emerald-900 bg-emerald-50 hover:bg-emerald-100 border border-emerald-200 rounded-xl cursor-pointer"
+                        >
+                          <Unlock className="w-3.5 h-3.5" aria-hidden="true" />
+                          <span>Günü Aç</span>
+                        </button>
+                      )}
+                    </div>
+
+                    <div className="space-y-2">
+                      {group.items.map((c) => {
+                        const typeLabel =
+                          c.reasonType === 'maintenance'
+                            ? 'Bakım'
+                            : c.reasonType === 'event'
+                            ? 'Etkinlik'
+                            : 'Diğer';
+                        return (
+                          <div
+                            key={c.id}
+                            className="p-3 bg-slate-50 border border-slate-200 rounded-xl flex flex-col sm:flex-row sm:items-center justify-between gap-2.5"
+                          >
+                            <div className="min-w-0 space-y-0.5">
+                              <div className="flex flex-wrap items-center gap-2 text-xs">
+                                <span className="font-mono font-bold text-slate-900">
+                                  {formatHourRange(c.hour)}
+                                </span>
+                                <span className="px-2 py-0.5 rounded-md bg-slate-200 text-slate-800 text-[11px] font-semibold">
+                                  {typeLabel}
+                                </span>
+                              </div>
+                              <p className="text-xs text-slate-600 break-words">{c.reasonText}</p>
+                            </div>
+
+                            {confirmReopenClosureId === c.id ? (
+                              <div className="inline-flex items-center gap-1.5 shrink-0">
+                                <button
+                                  type="button"
+                                  onClick={() => handleDeleteClosure(c.id)}
+                                  className="min-h-[36px] px-3 text-xs font-semibold text-white bg-emerald-700 hover:bg-emerald-800 rounded-lg cursor-pointer"
+                                >
+                                  Açmayı Onayla
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => setConfirmReopenClosureId(null)}
+                                  className="min-h-[36px] px-2.5 text-xs font-medium text-slate-600 bg-white border border-slate-300 rounded-lg cursor-pointer"
+                                >
+                                  Vazgeç
+                                </button>
+                              </div>
+                            ) : (
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  setConfirmReopenDateStr(null);
+                                  setConfirmReopenClosureId(c.id);
+                                }}
+                                className="min-h-[36px] inline-flex items-center gap-1 px-3 text-xs font-semibold text-slate-700 bg-white hover:bg-slate-100 border border-slate-300 rounded-lg shrink-0 cursor-pointer"
+                              >
+                                <Unlock className="w-3.5 h-3.5" aria-hidden="true" />
+                                <span>Kortu Aç</span>
+                              </button>
+                            )}
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
       {/* Sub-tab 3: Violations & Late Cancellations with Time Filter */}
       {subTab === 'violations' && (
         <div className="grid grid-cols-1 lg:grid-cols-12 gap-5 items-start">
@@ -2079,7 +2481,11 @@ export function AdminConsoleView({
                     <strong className="font-mono">
                       {(pendingRestore.payload.data.penalties ?? []).length}
                     </strong>{' '}
-                    yaptırım kaydını yükleyecektir.
+                    yaptırım ve{' '}
+                    <strong className="font-mono">
+                      {(pendingRestore.payload.data.courtClosures ?? []).length}
+                    </strong>{' '}
+                    kort kapatma kaydını yükleyecektir.
                   </p>
                 </div>
                 <div className="flex items-center gap-2 shrink-0">

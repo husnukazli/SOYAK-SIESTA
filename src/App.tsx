@@ -185,6 +185,9 @@ export default function App() {
         setPortalRefreshTick((n) => n + 1);
       } else if (event.type === 'partner:changed') {
         setPortalRefreshTick((n) => n + 1);
+      } else if (event.type === 'closure:changed') {
+        loadSchedule();
+        setPortalRefreshTick((n) => n + 1);
       }
     },
     [loadAuthStatus, loadSchedule, selectedDate, session]
